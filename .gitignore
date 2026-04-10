@@ -1,0 +1,50 @@
+# Ralph generated files
+.ralph/.call_count
+.ralph/.last_reset
+.ralph/.exit_signals
+.ralph/status.json
+.ralph/.ralph_session
+.ralph/.ralph_session_history
+.ralph/.claude_session_id
+.ralph/.response_analysis
+.ralph/.circuit_breaker_state
+.ralph/.circuit_breaker_history
+
+# Ralph logs and generated docs
+.ralph/logs/*
+!.ralph/logs/.gitkeep
+.ralph/docs/generated/*
+!.ralph/docs/generated/.gitkeep
+
+# Phlexed generated files (per-project output)
+.phlexed/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+.temp/
+
+# Ruby
+*.gem
+.bundle
+vendor/bundle
+
+# Rails (sample app)
+sample/log/*
+sample/tmp/*
+sample/storage/*
+sample/db/*.sqlite3
+sample/db/*.sqlite3-*
+sample/node_modules/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Ralph backup directories
+.ralph_backup_*
