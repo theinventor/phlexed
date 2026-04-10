@@ -1,0 +1,568 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# phlexed-style-scan — Scan the project's design system and build a style registry.
+#
+# Reads package.json for DaisyUI (or other design system) version,
+# tailwind.config.js / tailwind.config.ts for themes and custom extensions,
+# and emits .phlexed/style-registry.json — a structured catalog of the
+# design system vocabulary that Claude uses to avoid wrecking the styles.
+#
+# Supports: DaisyUI (Tailwind v3 style JS config), raw Tailwind, and a
+# "none" fallback for projects without Tailwind.
+#
+# Usage:
+#   phlexed-style-scan                  # scan current project
+#   phlexed-style-scan --project <path>
+#   phlexed-style-scan --output <path>
+#   phlexed-style-scan --check          # print summary, do not write file
+#   phlexed-style-scan --help
+
+require "json"
+require "pathname"
+require "optparse"
+require "time"
+require "fileutils"
+
+module Phlexed
+  module StyleScan
+    # The DaisyUI themes shipped in v4. If the user's daisyui config enables
+    # "all", we fall back to this full list.
+    DAISYUI_V4_BUILTIN_THEMES = %w[
+      light dark cupcake bumblebee emerald corporate synthwave retro
+      cyberpunk valentine halloween garden forest aqua lofty pastel
+      fantasy wireframe black luxury dracula cmyk autumn business
+      acid lemonade night coffee winter dim nord sunset
+    ].freeze
+
+    # Core DaisyUI CSS variable mappings — the semantic color tokens that
+    # every theme defines. These are stable across versions (v3/v4).
+    DAISYUI_CSS_VARIABLES = {
+      "primary"             => "oklch(var(--p))",
+      "primary_content"     => "oklch(var(--pc))",
+      "secondary"           => "oklch(var(--s))",
+      "secondary_content"   => "oklch(var(--sc))",
+      "accent"              => "oklch(var(--a))",
+      "accent_content"      => "oklch(var(--ac))",
+      "neutral"             => "oklch(var(--n))",
+      "neutral_content"     => "oklch(var(--nc))",
+      "base_100"            => "oklch(var(--b1))",
+      "base_200"            => "oklch(var(--b2))",
+      "base_300"            => "oklch(var(--b3))",
+      "base_content"        => "oklch(var(--bc))",
+      "info"                => "oklch(var(--in))",
+      "info_content"        => "oklch(var(--inc))",
+      "success"             => "oklch(var(--su))",
+      "success_content"     => "oklch(var(--suc))",
+      "warning"             => "oklch(var(--wa))",
+      "warning_content"     => "oklch(var(--wac))",
+      "error"               => "oklch(var(--er))",
+      "error_content"       => "oklch(var(--erc))"
+    }.freeze
+
+    # DaisyUI component class vocabulary. This is the canonical map of what
+    # classes exist and how Claude should use them. Hardcoded here because
+    # DaisyUI's component names are stable and the alternative (scraping
+    # daisyui's CSS) is fragile.
+    DAISYUI_COMPONENT_CLASSES = {
+      "btn" => {
+        base: "btn",
+        variants: %w[btn-primary btn-secondary btn-accent btn-neutral btn-info btn-success btn-warning btn-error btn-ghost btn-link btn-outline],
+        sizes: %w[btn-xs btn-sm btn-md btn-lg],
+        states: %w[btn-active btn-disabled glass],
+        shapes: %w[btn-square btn-circle btn-wide btn-block],
+        phlex_prop_hint: "variant: :primary, size: :lg → class 'btn btn-primary btn-lg'"
+      },
+      "card" => {
+        base: "card",
+        modifiers: %w[card-bordered card-compact card-side image-full],
+        children: %w[card-body card-title card-actions figure],
+        phlex_prop_hint: "bordered: true → class 'card card-bordered'"
+      },
+      "alert" => {
+        base: "alert",
+        variants: %w[alert-info alert-success alert-warning alert-error],
+        phlex_prop_hint: "variant: :success → class 'alert alert-success'"
+      },
+      "badge" => {
+        base: "badge",
+        variants: %w[badge-primary badge-secondary badge-accent badge-ghost badge-info badge-success badge-warning badge-error badge-neutral],
+        sizes: %w[badge-xs badge-sm badge-md badge-lg],
+        modifiers: %w[badge-outline]
+      },
+      "modal" => {
+        base: "modal",
+        modifiers: %w[modal-open modal-bottom modal-middle modal-top],
+        children: %w[modal-box modal-action modal-backdrop]
+      },
+      "dropdown" => {
+        base: "dropdown",
+        modifiers: %w[dropdown-end dropdown-top dropdown-bottom dropdown-left dropdown-right dropdown-hover dropdown-open],
+        children: %w[dropdown-content]
+      },
+      "tabs" => {
+        base: "tabs",
+        variants: %w[tabs-boxed tabs-bordered tabs-lifted],
+        sizes: %w[tabs-xs tabs-sm tabs-md tabs-lg],
+        children: %w[tab tab-active]
+      },
+      "navbar" => {
+        base: "navbar",
+        children: %w[navbar-start navbar-center navbar-end]
+      },
+      "menu" => {
+        base: "menu",
+        variants: %w[menu-horizontal menu-vertical],
+        sizes: %w[menu-xs menu-sm menu-md menu-lg],
+        children: %w[menu-title]
+      },
+      "input" => {
+        base: "input",
+        modifiers: %w[input-bordered input-ghost],
+        variants: %w[input-primary input-secondary input-accent input-info input-success input-warning input-error],
+        sizes: %w[input-xs input-sm input-md input-lg]
+      },
+      "select" => {
+        base: "select",
+        modifiers: %w[select-bordered select-ghost],
+        variants: %w[select-primary select-secondary select-accent select-info select-success select-warning select-error],
+        sizes: %w[select-xs select-sm select-md select-lg]
+      },
+      "textarea" => {
+        base: "textarea",
+        modifiers: %w[textarea-bordered textarea-ghost],
+        variants: %w[textarea-primary textarea-secondary textarea-accent textarea-info textarea-success textarea-warning textarea-error],
+        sizes: %w[textarea-xs textarea-sm textarea-md textarea-lg]
+      },
+      "checkbox" => {
+        base: "checkbox",
+        variants: %w[checkbox-primary checkbox-secondary checkbox-accent checkbox-success checkbox-warning checkbox-info checkbox-error],
+        sizes: %w[checkbox-xs checkbox-sm checkbox-md checkbox-lg]
+      },
+      "toggle" => {
+        base: "toggle",
+        variants: %w[toggle-primary toggle-secondary toggle-accent toggle-success toggle-warning toggle-info toggle-error],
+        sizes: %w[toggle-xs toggle-sm toggle-md toggle-lg]
+      },
+      "table" => {
+        base: "table",
+        modifiers: %w[table-zebra table-pin-rows table-pin-cols],
+        sizes: %w[table-xs table-sm table-md table-lg]
+      },
+      "stat" => {
+        base: "stats",
+        children: %w[stat stat-title stat-value stat-desc stat-figure stat-actions]
+      },
+      "loading" => {
+        base: "loading",
+        variants: %w[loading-spinner loading-dots loading-ring loading-ball loading-bars loading-infinity],
+        sizes: %w[loading-xs loading-sm loading-md loading-lg]
+      },
+      "progress" => {
+        base: "progress",
+        variants: %w[progress-primary progress-secondary progress-accent progress-info progress-success progress-warning progress-error]
+      }
+    }.freeze
+
+    DAISYUI_UTILITY_CLASSES = {
+      "spacing"    => "Use Tailwind spacing utilities: p-1 through p-96, m-1 through m-96, space-x-*, space-y-*, gap-*. Prefer these over custom CSS.",
+      "typography" => "Use 'prose' class for long-form content, 'text-base-content' for body text, 'text-primary' / 'text-secondary' for accented text. Never hardcode text colors.",
+      "layout"     => "Use DaisyUI layout classes: container, hero, footer, navbar, drawer. For grids use Tailwind: grid, grid-cols-*, gap-*.",
+      "shadows"    => "Use Tailwind shadow utilities: shadow, shadow-md, shadow-lg, shadow-xl. For DaisyUI components that ship with shadows (card, navbar), avoid manual shadow-* additions."
+    }.freeze
+
+    DAISYUI_ANTI_PATTERNS = [
+      "NEVER use raw color utilities (bg-blue-500, text-red-600, border-gray-200) when semantic colors exist (bg-primary, text-base-content, border-base-300).",
+      "NEVER use inline style=\"...\" attributes on Phlex components. Use props or Tailwind utilities.",
+      "NEVER create custom CSS classes when a DaisyUI modifier exists. Check the component_classes list first.",
+      "NEVER hardcode hex/rgb/hsl colors. Always use CSS variables (oklch(var(--p))) or semantic class names (bg-primary).",
+      "NEVER use raw Tailwind hover:/focus:/active: color states (hover:bg-blue-600) when DaisyUI handles them via component classes (btn btn-primary already has hover state).",
+      "NEVER duplicate DaisyUI's responsive behavior with custom media queries — use Tailwind's sm:/md:/lg: breakpoints.",
+      "NEVER inline btn classes when PhlexyUI::Button is available. Use the component, pass variant: and size: props.",
+      "NEVER mix DaisyUI themes with hand-rolled CSS variables in the same file — extend the theme in tailwind.config.js instead.",
+      "NEVER set data-theme on individual elements. Set it on <html> in the layout file for app-wide theming."
+    ].freeze
+
+    RAW_TAILWIND_ANTI_PATTERNS = [
+      "NEVER use arbitrary values ([#3f4f5f]) when a theme color exists.",
+      "NEVER use inline style=\"...\" attributes on Phlex components.",
+      "NEVER create custom CSS files when Tailwind can handle the styling.",
+      "NEVER use hardcoded color hex values. Use theme colors (primary, secondary, etc.).",
+      "NEVER duplicate responsive behavior with custom media queries — use sm:/md:/lg:/xl: prefixes."
+    ].freeze
+
+    class Scanner
+      attr_reader :project_root
+
+      def initialize(project_root:)
+        @project_root = Pathname.new(project_root).expand_path
+      end
+
+      def run
+        design_system, version = detect_design_system
+
+        case design_system
+        when "daisyui"
+          build_daisyui_registry(version)
+        when "tailwind"
+          build_tailwind_registry(version)
+        else
+          build_none_registry
+        end
+      end
+
+      private
+
+      def detect_design_system
+        package_json = @project_root.join("package.json")
+        return ["none", nil] unless package_json.exist?
+
+        begin
+          pkg = JSON.parse(package_json.read)
+        rescue JSON::ParserError
+          return ["none", nil]
+        end
+
+        deps = (pkg["dependencies"] || {}).merge(pkg["devDependencies"] || {})
+
+        if deps["daisyui"]
+          ["daisyui", normalize_version(deps["daisyui"])]
+        elsif deps["tailwindcss"]
+          ["tailwind", normalize_version(deps["tailwindcss"])]
+        else
+          ["none", nil]
+        end
+      end
+
+      def normalize_version(raw)
+        # "^4.12.0" → "4.12.0", "~4.0" → "4.0", "4.12.0" → "4.12.0"
+        raw.to_s.sub(/^[\^~>=<]+/, "").strip
+      end
+
+      def build_daisyui_registry(version)
+        config_info = parse_tailwind_config
+        active_theme = detect_active_theme(config_info[:themes])
+
+        {
+          design_system: "daisyui",
+          version: version || "unknown",
+          generated_at: Time.now.utc.iso8601,
+          project_root: @project_root.to_s,
+          themes: {
+            available: config_info[:themes],
+            active: active_theme,
+            dark_theme: config_info[:dark_theme],
+            custom_themes: config_info[:custom_themes],
+            how_to_switch: "Set data-theme attribute on <html> element (or individual elements for section-scoped themes)."
+          },
+          css_variables: DAISYUI_CSS_VARIABLES,
+          component_classes: DAISYUI_COMPONENT_CLASSES,
+          utility_classes: DAISYUI_UTILITY_CLASSES,
+          tailwind_extensions: config_info[:extensions],
+          anti_patterns: DAISYUI_ANTI_PATTERNS
+        }
+      end
+
+      def build_tailwind_registry(version)
+        config_info = parse_tailwind_config
+        {
+          design_system: "tailwind",
+          version: version || "unknown",
+          generated_at: Time.now.utc.iso8601,
+          project_root: @project_root.to_s,
+          themes: {
+            available: [],
+            active: nil,
+            how_to_switch: "Tailwind doesn't ship with themes — use dark: variant via darkMode: 'class' and toggle a 'dark' class on <html>."
+          },
+          css_variables: {},
+          component_classes: {},
+          utility_classes: {
+            "spacing"    => "Use Tailwind spacing utilities: p-*, m-*, space-*, gap-*.",
+            "typography" => "Use font-*, text-*, tracking-*, leading-* utilities. For prose content install @tailwindcss/typography.",
+            "layout"     => "Use Tailwind layout utilities: container, flex, grid, grid-cols-*, gap-*.",
+            "colors"     => "Use your tailwind.config.js theme colors. Never hardcode hex values."
+          },
+          tailwind_extensions: config_info[:extensions],
+          anti_patterns: RAW_TAILWIND_ANTI_PATTERNS
+        }
+      end
+
+      def build_none_registry
+        {
+          design_system: "none",
+          version: nil,
+          generated_at: Time.now.utc.iso8601,
+          project_root: @project_root.to_s,
+          notes: [
+            "No design system detected (no daisyui or tailwindcss in package.json).",
+            "If this project uses a different design system, add its anti-patterns to CLAUDE.md manually.",
+            "phlexed-theme will run in degraded mode — theme-related workflows will be no-ops."
+          ],
+          anti_patterns: [
+            "NEVER inline raw CSS colors — at minimum, use CSS variables.",
+            "NEVER add inline style=\"...\" attributes.",
+            "NEVER create scattered stylesheets — keep styles together in one place."
+          ]
+        }
+      end
+
+      # Parse tailwind.config.js (or .ts / .cjs / .mjs) for themes, custom
+      # theme extensions, and daisyui config block.
+      #
+      # Returns { themes:, dark_theme:, custom_themes:, extensions: }
+      def parse_tailwind_config
+        default = { themes: DAISYUI_V4_BUILTIN_THEMES.first(4), dark_theme: nil, custom_themes: [], extensions: {} }
+
+        config_path = find_tailwind_config
+        return default unless config_path
+
+        content = config_path.read
+
+        themes = extract_daisyui_themes(content) || default[:themes]
+        dark_theme = extract_daisyui_dark_theme(content)
+        custom_themes = extract_custom_themes(content)
+        extensions = extract_theme_extensions(content)
+
+        {
+          themes: themes,
+          dark_theme: dark_theme,
+          custom_themes: custom_themes,
+          extensions: extensions
+        }
+      end
+
+      def find_tailwind_config
+        %w[tailwind.config.js tailwind.config.ts tailwind.config.cjs tailwind.config.mjs].each do |name|
+          path = @project_root.join(name)
+          return path if path.exist?
+        end
+        nil
+      end
+
+      # daisyui: { themes: ["light", "dark", "cupcake"] }
+      # daisyui: { themes: true }   → all built-in themes
+      # daisyui: { themes: ["light", { mytheme: { ... } }] }
+      def extract_daisyui_themes(content)
+        daisyui_block = extract_balanced_block(content, /daisyui\s*:\s*/)
+        return nil unless daisyui_block
+
+        # themes: true → all built-in
+        return DAISYUI_V4_BUILTIN_THEMES if daisyui_block.match?(/themes\s*:\s*true/)
+
+        # themes: [ ... ] — extract the balanced array, which may contain
+        # nested objects for custom themes.
+        themes_raw = extract_balanced_array(daisyui_block, /themes\s*:\s*/)
+        return nil unless themes_raw
+
+        # Custom theme names first — the first key of each top-level `{ ... }`
+        # in the themes array (e.g., the `acme` in `{ acme: { primary: ... } }`)
+        custom_theme_names = top_level_object_first_keys(themes_raw)
+
+        # Plain themes — strip nested `{ ... }` blocks, then scan for
+        # top-level quoted string literals. This avoids picking up inner
+        # color prop names like "primary" or "secondary" from custom themes.
+        depth_zero = strip_nested_braces(themes_raw)
+        plain_themes = depth_zero.scan(/["']([a-zA-Z][a-zA-Z0-9_-]*)["']/).flatten
+
+        (plain_themes + custom_theme_names).uniq
+      end
+
+      # Walk text and find the first key of each `{ ... }` at depth 0.
+      # For `["light", { acme: { primary: "#fff" } }, { other: { ... } }]`
+      # returns ["acme", "other"].
+      def top_level_object_first_keys(text)
+        keys = []
+        depth = 0
+        i = 0
+        while i < text.length
+          ch = text[i]
+          if ch == "{" && depth == 0
+            rest = text[(i + 1)..]
+            if (m = rest.match(/\A\s*["']?([a-zA-Z][a-zA-Z0-9_-]*)["']?\s*:/))
+              keys << m[1]
+            end
+            depth += 1
+          elsif ch == "{"
+            depth += 1
+          elsif ch == "}"
+            depth -= 1
+          end
+          i += 1
+        end
+        keys
+      end
+
+      # Strip all nested `{ ... }` blocks from text, leaving only depth-0
+      # content. Used to isolate top-level quoted strings in a themes array.
+      def strip_nested_braces(text)
+        result = String.new
+        depth = 0
+        text.each_char do |ch|
+          if ch == "{"
+            depth += 1
+            next
+          elsif ch == "}"
+            depth -= 1
+            next
+          end
+          result << ch if depth.zero?
+        end
+        result
+      end
+
+      # Find the first occurrence of `prefix_regex` in content, then extract
+      # the balanced `{ ... }` block that follows it. Returns the block
+      # contents (without outer braces) or nil.
+      #
+      # Handles any depth of nested braces by counting depth forward.
+      def extract_balanced_block(content, prefix_regex)
+        extract_balanced(content, prefix_regex, "{", "}")
+      end
+
+      # Same idea but for balanced `[ ... ]` arrays.
+      def extract_balanced_array(content, prefix_regex)
+        extract_balanced(content, prefix_regex, "[", "]")
+      end
+
+      def extract_balanced(content, prefix_regex, open_char, close_char)
+        match = content.match(prefix_regex)
+        return nil unless match
+
+        start = match.end(0)
+        return nil unless content[start] == open_char
+
+        depth = 0
+        i = start
+        while i < content.length
+          ch = content[i]
+          if ch == open_char
+            depth += 1
+          elsif ch == close_char
+            depth -= 1
+            return content[(start + 1)...i] if depth.zero?
+          end
+          i += 1
+        end
+        nil
+      end
+
+      def extract_daisyui_dark_theme(content)
+        match = content.match(/darkTheme\s*:\s*["']([^"']+)["']/)
+        match ? match[1] : nil
+      end
+
+      # Look for custom theme definitions: { mytheme: { "primary": "#..." } }
+      # Only captures the names — full theme values are left to tailwind.config.js
+      def extract_custom_themes(content)
+        custom_names = []
+        content.scan(/\{\s*["']?([a-zA-Z][a-zA-Z0-9_-]*)["']?\s*:\s*\{[^}]*primary/).flatten.each do |name|
+          custom_names << name unless DAISYUI_V4_BUILTIN_THEMES.include?(name)
+        end
+        custom_names.uniq
+      end
+
+      # Extract theme.extend.colors and a few other useful extensions
+      def extract_theme_extensions(content)
+        extensions = {}
+
+        # extend: { colors: { brand: "#FF0066", ... } }
+        colors_match = content.match(/extend\s*:\s*\{[^}]*colors\s*:\s*\{([^}]+)\}/m)
+        if colors_match
+          colors_block = colors_match[1]
+          colors = {}
+          colors_block.scan(/([\w-]+)\s*:\s*["']([^"']+)["']/) { |k, v| colors[k] = v }
+          extensions[:colors] = colors if colors.any?
+        end
+
+        # extend: { fontFamily: { display: [...] } }
+        fonts_match = content.match(/extend\s*:\s*\{[^}]*fontFamily\s*:\s*\{([^}]+)\}/m)
+        if fonts_match
+          fonts_block = fonts_match[1]
+          fonts = fonts_block.scan(/([\w-]+)\s*:/).flatten
+          extensions[:font_families] = fonts if fonts.any?
+        end
+
+        extensions
+      end
+
+      # Scan layout files for the active data-theme attribute.
+      # Falls back to the first theme in the available list.
+      def detect_active_theme(available_themes)
+        # Look in the usual layout file locations
+        layout_candidates = [
+          "app/views/layouts/application.html.erb",
+          "app/views/layouts/application.html.haml",
+          "app/views/layouts/application.html.slim",
+          "app/views/layouts/application_layout.rb"
+        ]
+
+        layout_candidates.each do |rel|
+          path = @project_root.join(rel)
+          next unless path.exist?
+          body = path.read rescue next
+          if (m = body.match(/data-theme\s*=\s*["']([^"']+)["']/))
+            return m[1]
+          end
+        end
+
+        available_themes.first
+      end
+    end
+  end
+end
+
+# CLI entry point
+options = {
+  project: ".",
+  output: ".phlexed/style-registry.json",
+  check: false
+}
+
+OptionParser.new do |opts|
+  opts.banner = "Usage: phlexed-style-scan [options]"
+  opts.on("--project PATH", "Project root (default: current directory)") { |v| options[:project] = v }
+  opts.on("--output PATH", "Output JSON path (default: .phlexed/style-registry.json)") { |v| options[:output] = v }
+  opts.on("--check", "Print summary, do not write file") { options[:check] = true }
+  opts.on("-h", "--help", "Show help") { puts opts; exit }
+end.parse!
+
+project_root = File.expand_path(options[:project])
+unless Dir.exist?(project_root)
+  warn "error: project root does not exist: #{project_root}"
+  exit 1
+end
+
+scanner = Phlexed::StyleScan::Scanner.new(project_root: project_root)
+registry = scanner.run
+
+puts "Style registry for #{project_root}"
+puts "  design_system: #{registry[:design_system]}"
+puts "  version:       #{registry[:version] || '-'}"
+
+if registry[:design_system] == "daisyui"
+  puts "  themes:        #{registry[:themes][:available].size} available (active: #{registry[:themes][:active]})"
+  puts "  dark theme:    #{registry[:themes][:dark_theme] || '-'}"
+  puts "  custom themes: #{registry[:themes][:custom_themes].size}"
+  puts "  components:    #{registry[:component_classes].size} DaisyUI component classes cataloged"
+  if registry[:tailwind_extensions][:colors]&.any?
+    puts "  extended colors: #{registry[:tailwind_extensions][:colors].keys.join(', ')}"
+  end
+  puts "  anti-patterns: #{registry[:anti_patterns].size} rules"
+elsif registry[:design_system] == "tailwind"
+  puts "  (Tailwind without DaisyUI — using minimal style registry)"
+elsif registry[:design_system] == "none"
+  puts "  (No Tailwind/DaisyUI detected — degraded-mode registry written)"
+end
+
+if options[:check]
+  puts
+  puts "(--check mode: not writing output file)"
+  exit 0
+end
+
+output_path = File.expand_path(options[:output], project_root)
+FileUtils.mkdir_p(File.dirname(output_path))
+File.write(output_path, JSON.pretty_generate(registry))
+puts
+puts "Style registry written to #{options[:output]}"

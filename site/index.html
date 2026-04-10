@@ -1,0 +1,1017 @@
+<!doctype html>
+<html lang="en" data-theme="phlexed-dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>phlexed — AI skill system for Phlex UI in Rails</title>
+  <meta name="description" content="Drop phlexed into a Rails project and Claude Code produces consistent, component-based Phlex output every time. Before/after is dramatic." />
+  <meta property="og:title" content="phlexed — AI skill system for Phlex UI in Rails" />
+  <meta property="og:description" content="Makes Claude Code produce consistent, component-based Phlex output. Works with PhlexyUI, shadcn_phlexcomponents, and your own components." />
+  <meta property="og:type" content="website" />
+  <meta property="og:url" content="https://phlexed.com" />
+
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" />
+  <script src="https://cdn.tailwindcss.com?plugins=typography"></script>
+  <link href="https://cdn.jsdelivr.net/npm/daisyui@4.12.10/dist/full.min.css" rel="stylesheet" type="text/css" />
+
+  <link href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+
+  <script>
+    tailwind.config = {
+      daisyui: {
+        themes: [
+          {
+            "phlexed-dark": {
+              "primary": "#a78bfa",
+              "primary-content": "#0b0610",
+              "secondary": "#22d3ee",
+              "secondary-content": "#001014",
+              "accent": "#f472b6",
+              "accent-content": "#2a0715",
+              "neutral": "#1a1625",
+              "neutral-content": "#e9e4f5",
+              "base-100": "#0b0610",
+              "base-200": "#140d1f",
+              "base-300": "#1d1430",
+              "base-content": "#e9e4f5",
+              "info": "#60a5fa",
+              "success": "#4ade80",
+              "warning": "#fbbf24",
+              "error": "#f87171"
+            }
+          }
+        ]
+      },
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', 'ui-sans-serif', 'system-ui'],
+            mono: ['JetBrains Mono', 'ui-monospace', 'monospace']
+          }
+        }
+      }
+    }
+  </script>
+
+  <style>
+    html { scroll-behavior: smooth; }
+    body { font-family: 'Inter', ui-sans-serif, system-ui, sans-serif; }
+    pre[class*="language-"], code[class*="language-"] {
+      font-family: 'JetBrains Mono', ui-monospace, monospace !important;
+      font-size: 0.85rem;
+      line-height: 1.55;
+    }
+    .hero-glow {
+      background: radial-gradient(ellipse 80% 60% at 50% 0%,
+        rgba(167, 139, 250, 0.18),
+        rgba(34, 211, 238, 0.08) 40%,
+        transparent 70%);
+    }
+    .grid-bg {
+      background-image:
+        linear-gradient(rgba(167, 139, 250, 0.05) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(167, 139, 250, 0.05) 1px, transparent 1px);
+      background-size: 48px 48px;
+    }
+    .code-card {
+      background: #0f0b1a;
+      border: 1px solid rgba(167, 139, 250, 0.18);
+      border-radius: 1rem;
+      overflow: hidden;
+    }
+    .code-card-header {
+      background: rgba(167, 139, 250, 0.05);
+      border-bottom: 1px solid rgba(167, 139, 250, 0.12);
+      padding: 0.75rem 1rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .dot { width: 10px; height: 10px; border-radius: 9999px; }
+    .dot-r { background: #f87171; }
+    .dot-y { background: #fbbf24; }
+    .dot-g { background: #4ade80; }
+    pre[class*="language-"] {
+      margin: 0 !important;
+      padding: 1.1rem 1.25rem !important;
+      background: transparent !important;
+      max-height: 520px;
+      overflow: auto;
+    }
+    .gradient-text {
+      background: linear-gradient(120deg, #a78bfa 0%, #22d3ee 50%, #f472b6 100%);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.375rem;
+      padding: 0.25rem 0.75rem;
+      border-radius: 9999px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      border: 1px solid rgba(167, 139, 250, 0.25);
+      background: rgba(167, 139, 250, 0.08);
+      color: #c7b8ff;
+    }
+    .chip-bad {
+      border-color: rgba(248, 113, 113, 0.35);
+      background: rgba(248, 113, 113, 0.08);
+      color: #fca5a5;
+    }
+    .chip-good {
+      border-color: rgba(74, 222, 128, 0.35);
+      background: rgba(74, 222, 128, 0.08);
+      color: #86efac;
+    }
+    .link-underline {
+      background-image: linear-gradient(currentColor, currentColor);
+      background-size: 0 1px;
+      background-position: 0 100%;
+      background-repeat: no-repeat;
+      transition: background-size 0.2s ease;
+    }
+    .link-underline:hover { background-size: 100% 1px; }
+
+    /* Gallery tabs — DaisyUI radio tabs with custom brand look */
+    .gallery-tabs { display: flex; flex-wrap: wrap; gap: 0.5rem; justify-content: center; margin-bottom: 2rem; }
+    .gallery-tab-label {
+      cursor: pointer;
+      padding: 0.625rem 1.25rem;
+      border-radius: 9999px;
+      font-size: 0.875rem;
+      font-weight: 600;
+      border: 1px solid rgba(167, 139, 250, 0.25);
+      background: rgba(167, 139, 250, 0.05);
+      color: rgba(233, 228, 245, 0.7);
+      transition: all 0.2s ease;
+    }
+    .gallery-tab-label:hover {
+      background: rgba(167, 139, 250, 0.12);
+      color: #e9e4f5;
+    }
+    .gallery-panel { display: none; }
+    input[name="gallery_tabs"] { display: none; }
+    input[name="gallery_tabs"]:checked + .gallery-tab-label {
+      background: linear-gradient(120deg, rgba(167, 139, 250, 0.25), rgba(34, 211, 238, 0.2));
+      border-color: rgba(167, 139, 250, 0.6);
+      color: #fff;
+      box-shadow: 0 0 0 1px rgba(167, 139, 250, 0.3);
+    }
+    #tab-pricing:checked ~ .gallery-panels #panel-pricing,
+    #tab-dashboard:checked ~ .gallery-panels #panel-dashboard,
+    #tab-navbar:checked ~ .gallery-panels #panel-navbar { display: block; }
+  </style>
+</head>
+<body class="min-h-screen bg-base-100 text-base-content antialiased">
+
+  <!-- ===== Nav ===== -->
+  <header class="sticky top-0 z-30 backdrop-blur-md bg-base-100/70 border-b border-base-300/60">
+    <div class="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
+      <a href="#" class="flex items-center gap-2 font-extrabold text-lg tracking-tight">
+        <span class="inline-block w-7 h-7 rounded-lg bg-gradient-to-br from-primary to-secondary"></span>
+        <span>phlexed</span>
+      </a>
+      <nav class="hidden md:flex items-center gap-6 text-sm font-medium text-base-content/80">
+        <a href="#before-after" class="hover:text-primary transition">Before / after</a>
+        <a href="#gallery" class="hover:text-primary transition">Gallery</a>
+        <a href="#skills" class="hover:text-primary transition">Skills</a>
+        <a href="#how" class="hover:text-primary transition">How it works</a>
+        <a href="#install" class="hover:text-primary transition">Install</a>
+      </nav>
+      <div class="flex items-center gap-3">
+        <a href="https://github.com/theinventor/phlexed" class="btn btn-sm btn-ghost hidden sm:inline-flex" aria-label="GitHub">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5"><path fill-rule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.009-.868-.014-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.02 10.02 0 0022 12.017C22 6.484 17.523 2 12 2z" clip-rule="evenodd"/></svg>
+          <span>GitHub</span>
+        </a>
+        <a href="#install" class="btn btn-sm btn-primary">Install</a>
+      </div>
+    </div>
+  </header>
+
+  <!-- ===== Hero ===== -->
+  <section class="relative overflow-hidden">
+    <div class="absolute inset-0 grid-bg opacity-40 pointer-events-none"></div>
+    <div class="absolute inset-0 hero-glow pointer-events-none"></div>
+
+    <div class="max-w-6xl mx-auto px-6 pt-20 pb-24 relative">
+      <div class="flex justify-center mb-6">
+        <span class="chip">
+          <span class="inline-block w-1.5 h-1.5 rounded-full bg-secondary"></span>
+          AI skill system for Phlex UI in Rails
+        </span>
+      </div>
+
+      <h1 class="text-center text-5xl md:text-7xl font-extrabold tracking-tight leading-[1.05]">
+        Make Claude Code write<br />
+        <span class="gradient-text">beautiful Phlex</span>.
+      </h1>
+
+      <p class="mt-6 text-center text-lg md:text-xl text-base-content/70 max-w-2xl mx-auto">
+        Drop phlexed into your Rails project and every AI-generated page becomes a well-composed
+        Phlex component tree — not a soup of inline Tailwind.
+      </p>
+
+      <!-- Install quick-command -->
+      <div class="mt-10 max-w-2xl mx-auto">
+        <div class="code-card">
+          <div class="code-card-header">
+            <span class="dot dot-r"></span>
+            <span class="dot dot-y"></span>
+            <span class="dot dot-g"></span>
+            <span class="ml-2 text-xs font-mono text-base-content/50">~/projects/your-rails-app</span>
+          </div>
+          <pre class="language-bash"><code>$ git clone git@github.com:theinventor/phlexed.git ~/.claude/skills/phlexed
+$ cd ~/.claude/skills/phlexed &amp;&amp; ./setup
+$ cd ~/projects/your-rails-app
+$ claude
+&gt; /phlexed-setup</code></pre>
+        </div>
+      </div>
+
+      <div class="mt-10 flex flex-wrap items-center justify-center gap-3 text-sm text-base-content/60">
+        <span class="chip">Claude Code</span>
+        <span class="chip">PhlexyUI</span>
+        <span class="chip">shadcn_phlexcomponents</span>
+        <span class="chip">DaisyUI themes</span>
+        <span class="chip">Open source</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== Before / After ===== -->
+  <section id="before-after" class="relative py-20 bg-base-200/40 border-y border-base-300/60">
+    <div class="max-w-6xl mx-auto px-6">
+      <div class="text-center mb-14">
+        <div class="chip mb-4">The dramatic part</div>
+        <h2 class="text-4xl md:text-5xl font-extrabold tracking-tight">
+          Same prompt. <span class="gradient-text">Totally different output.</span>
+        </h2>
+        <p class="mt-4 text-base-content/70 max-w-2xl mx-auto">
+          Prompt: <em>&ldquo;Build me a settings page with a profile form.&rdquo;</em>
+          Here&rsquo;s what Claude Code produces with and without phlexed installed.
+        </p>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-6 lg:gap-8">
+        <!-- BEFORE -->
+        <div>
+          <div class="flex items-center gap-3 mb-3">
+            <span class="chip chip-bad">Without phlexed</span>
+            <span class="text-xs text-base-content/50 font-mono">app/views/settings/index.html.erb</span>
+          </div>
+          <div class="code-card">
+            <div class="code-card-header">
+              <span class="dot dot-r"></span>
+              <span class="dot dot-y"></span>
+              <span class="dot dot-g"></span>
+              <span class="ml-2 text-xs font-mono text-base-content/50">40 lines · inline soup · hardcoded classes</span>
+            </div>
+<pre class="language-erb"><code>&lt;h1 class="text-3xl font-bold mb-6"&gt;Settings&lt;/h1&gt;
+
+&lt;div class="card card-bordered bg-base-100 max-w-2xl"&gt;
+  &lt;div class="card-body"&gt;
+    &lt;h2 class="card-title"&gt;Profile&lt;/h2&gt;
+    &lt;p class="text-base-content/70"&gt;Update your public profile.&lt;/p&gt;
+
+    &lt;%= form_with model: @user, url: settings_path, method: :patch do |f| %&gt;
+      &lt;div class="form-control"&gt;
+        &lt;%= f.label :name, class: "label" %&gt;
+        &lt;%= f.text_field :name, class: "input input-bordered w-full" %&gt;
+      &lt;/div&gt;
+
+      &lt;div class="form-control"&gt;
+        &lt;%= f.label :email, class: "label" %&gt;
+        &lt;%= f.email_field :email, class: "input input-bordered w-full" %&gt;
+      &lt;/div&gt;
+
+      &lt;div class="form-control"&gt;
+        &lt;%= f.label :bio, class: "label" %&gt;
+        &lt;%= f.text_area :bio, class: "textarea textarea-bordered w-full", rows: 4 %&gt;
+      &lt;/div&gt;
+
+      &lt;div class="form-control"&gt;
+        &lt;label class="label cursor-pointer"&gt;
+          &lt;span class="label-text"&gt;Receive notifications&lt;/span&gt;
+          &lt;%= f.check_box :notifications_enabled, class: "toggle toggle-primary" %&gt;
+        &lt;/label&gt;
+      &lt;/div&gt;
+
+      &lt;div class="card-actions justify-end mt-4"&gt;
+        &lt;%= link_to "Cancel", root_path, class: "btn btn-ghost" %&gt;
+        &lt;%= f.submit "Save", class: "btn btn-primary" %&gt;
+      &lt;/div&gt;
+    &lt;% end %&gt;
+  &lt;/div&gt;
+&lt;/div&gt;</code></pre>
+          </div>
+          <ul class="mt-4 space-y-1.5 text-sm text-base-content/70">
+            <li class="flex gap-2"><span class="text-error">✗</span> Hardcoded DaisyUI class strings everywhere</li>
+            <li class="flex gap-2"><span class="text-error">✗</span> Breaks if the design system changes</li>
+            <li class="flex gap-2"><span class="text-error">✗</span> Nothing is reusable on the next page</li>
+          </ul>
+        </div>
+
+        <!-- AFTER -->
+        <div>
+          <div class="flex items-center gap-3 mb-3">
+            <span class="chip chip-good">With phlexed</span>
+            <span class="text-xs text-base-content/50 font-mono">app/views/settings/index_view.rb</span>
+          </div>
+          <div class="code-card">
+            <div class="code-card-header">
+              <span class="dot dot-r"></span>
+              <span class="dot dot-y"></span>
+              <span class="dot dot-g"></span>
+              <span class="ml-2 text-xs font-mono text-base-content/50">24 lines · composed components · registry-aware</span>
+            </div>
+<pre class="language-ruby"><code>module Settings
+  class IndexView &lt; Views::Base
+    def initialize(user:)
+      @user = user
+    end
+
+    def view_template
+      h1(class: "text-3xl font-bold mb-6") { "Settings" }
+
+      render PhlexyUI::Card.new(bordered: true, class: "max-w-2xl") do
+        render PhlexyUI::CardTitle.new { "Profile" }
+        render PhlexyUI::CardBody.new do
+          para(class: "text-base-content/70") { "Update your public profile." }
+
+          form_with(model: @user, url: settings_path, method: :patch) do |f|
+            render PhlexyUI::FormControl.new(label: "Name")  { f.text_field :name,  class: "input input-bordered w-full" }
+            render PhlexyUI::FormControl.new(label: "Email") { f.email_field :email, class: "input input-bordered w-full" }
+            render PhlexyUI::FormControl.new(label: "Bio")   { f.text_area :bio,    class: "textarea textarea-bordered w-full", rows: 4 }
+            render PhlexyUI::Toggle.new(label: "Receive notifications", variant: :primary, name: "user[notifications_enabled]")
+
+            render PhlexyUI::CardActions.new(justify: :end) do
+              render PhlexyUI::Button.new(as: :a, variant: :ghost, href: root_path) { "Cancel" }
+              render PhlexyUI::Button.new(as: :submit, variant: :primary) { "Save" }
+            end
+          end
+        end
+      end
+    end
+  end
+end</code></pre>
+          </div>
+          <ul class="mt-4 space-y-1.5 text-sm text-base-content/70">
+            <li class="flex gap-2"><span class="text-success">✓</span> Composed from registered PhlexyUI components</li>
+            <li class="flex gap-2"><span class="text-success">✓</span> Theme-switch safe — no hardcoded colors</li>
+            <li class="flex gap-2"><span class="text-success">✓</span> Every piece is reusable on the next page</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== Gallery ===== -->
+  <section id="gallery" class="relative py-20">
+    <div class="max-w-6xl mx-auto px-6">
+      <div class="text-center mb-12">
+        <div class="chip mb-4">Component gallery</div>
+        <h2 class="text-4xl md:text-5xl font-extrabold tracking-tight">
+          Every page. <span class="gradient-text">Same transformation.</span>
+        </h2>
+        <p class="mt-4 text-base-content/70 max-w-2xl mx-auto">
+          Three more prompts, three more before/after pairs. Pick a tab to see what
+          Claude Code produces with phlexed installed.
+        </p>
+      </div>
+
+      <!-- JS-free radio tabs -->
+      <input type="radio" name="gallery_tabs" id="tab-pricing" checked />
+      <input type="radio" name="gallery_tabs" id="tab-dashboard" />
+      <input type="radio" name="gallery_tabs" id="tab-navbar" />
+
+      <div class="gallery-tabs">
+        <label for="tab-pricing" class="gallery-tab-label">Pricing page</label>
+        <label for="tab-dashboard" class="gallery-tab-label">Dashboard stats</label>
+        <label for="tab-navbar" class="gallery-tab-label">Navbar + dropdown</label>
+      </div>
+
+      <div class="gallery-panels">
+
+        <!-- ===== Panel: Pricing ===== -->
+        <div id="panel-pricing" class="gallery-panel">
+          <p class="text-center text-sm text-base-content/60 mb-6 font-mono">
+            &gt; build me a 3-tier pricing page with a featured plan
+          </p>
+          <div class="grid md:grid-cols-2 gap-6 lg:gap-8">
+            <div>
+              <div class="flex items-center gap-3 mb-3">
+                <span class="chip chip-bad">Without phlexed</span>
+                <span class="text-xs text-base-content/50 font-mono">47 lines · duplicated card markup</span>
+              </div>
+              <div class="code-card">
+                <div class="code-card-header">
+                  <span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span>
+                  <span class="ml-2 text-xs font-mono text-base-content/50">app/views/pricing/index.html.erb</span>
+                </div>
+<pre class="language-erb"><code>&lt;section class="py-16 bg-base-200"&gt;
+  &lt;h1 class="text-4xl font-bold text-center mb-12"&gt;Pricing&lt;/h1&gt;
+
+  &lt;div class="grid md:grid-cols-3 gap-6 max-w-5xl mx-auto px-4"&gt;
+    &lt;div class="card card-bordered bg-base-100"&gt;
+      &lt;div class="card-body"&gt;
+        &lt;h2 class="card-title"&gt;Starter&lt;/h2&gt;
+        &lt;p class="text-3xl font-bold"&gt;$0&lt;span class="text-sm font-normal"&gt;/mo&lt;/span&gt;&lt;/p&gt;
+        &lt;ul class="mt-4 space-y-1 text-sm"&gt;
+          &lt;li&gt;• 1 project&lt;/li&gt;
+          &lt;li&gt;• Community support&lt;/li&gt;
+        &lt;/ul&gt;
+        &lt;div class="card-actions mt-6"&gt;
+          &lt;button class="btn btn-outline w-full"&gt;Get started&lt;/button&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;div class="card card-bordered bg-primary text-primary-content border-primary ring-2 ring-primary"&gt;
+      &lt;div class="card-body"&gt;
+        &lt;div class="badge badge-accent"&gt;Most popular&lt;/div&gt;
+        &lt;h2 class="card-title"&gt;Pro&lt;/h2&gt;
+        &lt;p class="text-3xl font-bold"&gt;$29&lt;span class="text-sm font-normal"&gt;/mo&lt;/span&gt;&lt;/p&gt;
+        &lt;ul class="mt-4 space-y-1 text-sm"&gt;
+          &lt;li&gt;• Unlimited projects&lt;/li&gt;
+          &lt;li&gt;• Priority support&lt;/li&gt;
+          &lt;li&gt;• All integrations&lt;/li&gt;
+        &lt;/ul&gt;
+        &lt;div class="card-actions mt-6"&gt;
+          &lt;button class="btn btn-accent w-full"&gt;Start trial&lt;/button&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;div class="card card-bordered bg-base-100"&gt;
+      &lt;div class="card-body"&gt;
+        &lt;h2 class="card-title"&gt;Team&lt;/h2&gt;
+        &lt;p class="text-3xl font-bold"&gt;$99&lt;span class="text-sm font-normal"&gt;/mo&lt;/span&gt;&lt;/p&gt;
+        &lt;!-- ...another 10 lines of duplicated structure... --&gt;
+      &lt;/div&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+&lt;/section&gt;</code></pre>
+              </div>
+            </div>
+
+            <div>
+              <div class="flex items-center gap-3 mb-3">
+                <span class="chip chip-good">With phlexed</span>
+                <span class="text-xs text-base-content/50 font-mono">28 lines · one plan loop</span>
+              </div>
+              <div class="code-card">
+                <div class="code-card-header">
+                  <span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span>
+                  <span class="ml-2 text-xs font-mono text-base-content/50">app/views/pricing/index_view.rb</span>
+                </div>
+<pre class="language-ruby"><code>module Pricing
+  class IndexView &lt; Views::Base
+    PLANS = [
+      { name: "Starter", price: "$0",  features: ["1 project", "Community support"],                          cta: "Get started", variant: :outline },
+      { name: "Pro",     price: "$29", features: ["Unlimited projects", "Priority support", "All integrations"], cta: "Start trial", variant: :primary, featured: true },
+      { name: "Team",    price: "$99", features: ["Everything in Pro", "SSO + SAML", "Dedicated CSM"],            cta: "Contact sales", variant: :outline }
+    ]
+
+    def view_template
+      section(class: "py-16 bg-base-200") do
+        h1(class: "text-4xl font-bold text-center mb-12") { "Pricing" }
+
+        div(class: "grid md:grid-cols-3 gap-6 max-w-5xl mx-auto px-4") do
+          PLANS.each do |plan|
+            render PhlexyUI::Card.new(bordered: true, variant: plan[:featured] ? :primary : nil) do
+              render PhlexyUI::CardBody.new do
+                render PhlexyUI::Badge.new(variant: :accent) { "Most popular" } if plan[:featured]
+                render PhlexyUI::CardTitle.new { plan[:name] }
+                para(class: "text-3xl font-bold") { "#{plan[:price]}" + plain(" /mo") }
+                ul(class: "mt-4 space-y-1 text-sm") { plan[:features].each { |f| li { "• #{f}" } } }
+                render PhlexyUI::CardActions.new do
+                  render PhlexyUI::Button.new(variant: plan[:variant], class: "w-full") { plan[:cta] }
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+end</code></pre>
+              </div>
+            </div>
+          </div>
+          <div class="mt-6 grid md:grid-cols-3 gap-4 text-sm text-base-content/70">
+            <div class="flex gap-2"><span class="text-success">✓</span> Plans are data, not markup</div>
+            <div class="flex gap-2"><span class="text-success">✓</span> Add a 4th tier in one line</div>
+            <div class="flex gap-2"><span class="text-success">✓</span> Theme-switch safe</div>
+          </div>
+        </div>
+
+        <!-- ===== Panel: Dashboard ===== -->
+        <div id="panel-dashboard" class="gallery-panel">
+          <p class="text-center text-sm text-base-content/60 mb-6 font-mono">
+            &gt; build me a dashboard with 4 stat cards and a recent activity list
+          </p>
+          <div class="grid md:grid-cols-2 gap-6 lg:gap-8">
+            <div>
+              <div class="flex items-center gap-3 mb-3">
+                <span class="chip chip-bad">Without phlexed</span>
+                <span class="text-xs text-base-content/50 font-mono">52 lines · 4x stat copy-paste</span>
+              </div>
+              <div class="code-card">
+                <div class="code-card-header">
+                  <span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span>
+                  <span class="ml-2 text-xs font-mono text-base-content/50">app/views/dashboard/show.html.erb</span>
+                </div>
+<pre class="language-erb"><code>&lt;div class="p-8 bg-base-200 min-h-screen"&gt;
+  &lt;h1 class="text-3xl font-bold mb-6"&gt;Dashboard&lt;/h1&gt;
+
+  &lt;div class="stats shadow w-full mb-8"&gt;
+    &lt;div class="stat"&gt;
+      &lt;div class="stat-figure text-primary"&gt;
+        &lt;svg class="w-8 h-8"&gt;&lt;!-- users icon --&gt;&lt;/svg&gt;
+      &lt;/div&gt;
+      &lt;div class="stat-title"&gt;Total users&lt;/div&gt;
+      &lt;div class="stat-value text-primary"&gt;31,842&lt;/div&gt;
+      &lt;div class="stat-desc"&gt;↗︎ 400 (22%)&lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;div class="stat"&gt;
+      &lt;div class="stat-figure text-secondary"&gt;
+        &lt;svg class="w-8 h-8"&gt;&lt;!-- chart icon --&gt;&lt;/svg&gt;
+      &lt;/div&gt;
+      &lt;div class="stat-title"&gt;Revenue&lt;/div&gt;
+      &lt;div class="stat-value text-secondary"&gt;$89,400&lt;/div&gt;
+      &lt;div class="stat-desc"&gt;↗︎ 21% month over month&lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;div class="stat"&gt;
+      &lt;div class="stat-figure text-accent"&gt;
+        &lt;svg class="w-8 h-8"&gt;&lt;!-- cart icon --&gt;&lt;/svg&gt;
+      &lt;/div&gt;
+      &lt;div class="stat-title"&gt;Orders&lt;/div&gt;
+      &lt;div class="stat-value"&gt;1,200&lt;/div&gt;
+      &lt;div class="stat-desc"&gt;↘︎ 90 (14%)&lt;/div&gt;
+    &lt;/div&gt;
+
+    &lt;!-- ...one more duplicate stat block... --&gt;
+  &lt;/div&gt;
+
+  &lt;div class="card card-bordered bg-base-100"&gt;
+    &lt;div class="card-body"&gt;
+      &lt;h2 class="card-title"&gt;Recent activity&lt;/h2&gt;
+      &lt;ul class="divide-y divide-base-300"&gt;
+        &lt;% @activities.each do |a| %&gt;
+          &lt;li class="py-3 flex justify-between"&gt;
+            &lt;span&gt;&lt;%= a.description %&gt;&lt;/span&gt;
+            &lt;span class="text-sm text-base-content/60"&gt;&lt;%= time_ago_in_words(a.created_at) %&gt;&lt;/span&gt;
+          &lt;/li&gt;
+        &lt;% end %&gt;
+      &lt;/ul&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+&lt;/div&gt;</code></pre>
+              </div>
+            </div>
+
+            <div>
+              <div class="flex items-center gap-3 mb-3">
+                <span class="chip chip-good">With phlexed</span>
+                <span class="text-xs text-base-content/50 font-mono">31 lines · stats loop + card</span>
+              </div>
+              <div class="code-card">
+                <div class="code-card-header">
+                  <span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span>
+                  <span class="ml-2 text-xs font-mono text-base-content/50">app/views/dashboard/show_view.rb</span>
+                </div>
+<pre class="language-ruby"><code>module Dashboard
+  class ShowView &lt; Views::Base
+    def initialize(stats:, activities:)
+      @stats = stats
+      @activities = activities
+    end
+
+    def view_template
+      div(class: "p-8 bg-base-200 min-h-screen") do
+        h1(class: "text-3xl font-bold mb-6") { "Dashboard" }
+
+        render PhlexyUI::Stats.new(shadow: true, class: "w-full mb-8") do
+          @stats.each do |s|
+            render PhlexyUI::Stat.new(
+              figure: s[:icon],
+              figure_color: s[:color],
+              title: s[:title],
+              value: s[:value],
+              value_color: s[:color],
+              desc: s[:desc]
+            )
+          end
+        end
+
+        render PhlexyUI::Card.new(bordered: true) do
+          render PhlexyUI::CardBody.new do
+            render PhlexyUI::CardTitle.new { "Recent activity" }
+            ul(class: "divide-y divide-base-300") do
+              @activities.each do |a|
+                li(class: "py-3 flex justify-between") do
+                  span { a.description }
+                  span(class: "text-sm text-base-content/60") { time_ago_in_words(a.created_at) }
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+end</code></pre>
+              </div>
+            </div>
+          </div>
+          <div class="mt-6 grid md:grid-cols-3 gap-4 text-sm text-base-content/70">
+            <div class="flex gap-2"><span class="text-success">✓</span> Add a 5th stat by pushing to the array</div>
+            <div class="flex gap-2"><span class="text-success">✓</span> Zero inline color hardcoding</div>
+            <div class="flex gap-2"><span class="text-success">✓</span> Controller returns data, view composes</div>
+          </div>
+        </div>
+
+        <!-- ===== Panel: Navbar ===== -->
+        <div id="panel-navbar" class="gallery-panel">
+          <p class="text-center text-sm text-base-content/60 mb-6 font-mono">
+            &gt; build me a top nav with logo, menu, theme toggle, and a user avatar dropdown
+          </p>
+          <div class="grid md:grid-cols-2 gap-6 lg:gap-8">
+            <div>
+              <div class="flex items-center gap-3 mb-3">
+                <span class="chip chip-bad">Without phlexed</span>
+                <span class="text-xs text-base-content/50 font-mono">58 lines · nested dropdown markup</span>
+              </div>
+              <div class="code-card">
+                <div class="code-card-header">
+                  <span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span>
+                  <span class="ml-2 text-xs font-mono text-base-content/50">app/views/shared/_nav.html.erb</span>
+                </div>
+<pre class="language-erb"><code>&lt;div class="navbar bg-base-100 border-b border-base-300"&gt;
+  &lt;div class="navbar-start"&gt;
+    &lt;a class="btn btn-ghost text-xl" href="/"&gt;Acme&lt;/a&gt;
+  &lt;/div&gt;
+  &lt;div class="navbar-center hidden lg:flex"&gt;
+    &lt;ul class="menu menu-horizontal px-1"&gt;
+      &lt;li&gt;&lt;a href="/dashboard"&gt;Dashboard&lt;/a&gt;&lt;/li&gt;
+      &lt;li&gt;&lt;a href="/projects"&gt;Projects&lt;/a&gt;&lt;/li&gt;
+      &lt;li&gt;&lt;a href="/docs"&gt;Docs&lt;/a&gt;&lt;/li&gt;
+    &lt;/ul&gt;
+  &lt;/div&gt;
+  &lt;div class="navbar-end gap-2"&gt;
+    &lt;label class="swap swap-rotate"&gt;
+      &lt;input type="checkbox" class="theme-controller" value="dark" /&gt;
+      &lt;svg class="swap-on fill-current w-6 h-6"&gt;&lt;!-- moon --&gt;&lt;/svg&gt;
+      &lt;svg class="swap-off fill-current w-6 h-6"&gt;&lt;!-- sun --&gt;&lt;/svg&gt;
+    &lt;/label&gt;
+    &lt;div class="dropdown dropdown-end"&gt;
+      &lt;div tabindex="0" role="button" class="btn btn-ghost btn-circle avatar"&gt;
+        &lt;div class="w-10 rounded-full"&gt;
+          &lt;img src="&lt;%= current_user.avatar_url %&gt;" alt="avatar" /&gt;
+        &lt;/div&gt;
+      &lt;/div&gt;
+      &lt;ul tabindex="0" class="menu menu-sm dropdown-content mt-3 z-10 p-2 shadow bg-base-100 rounded-box w-52"&gt;
+        &lt;li&gt;&lt;a href="/profile"&gt;Profile&lt;/a&gt;&lt;/li&gt;
+        &lt;li&gt;&lt;a href="/settings"&gt;Settings&lt;/a&gt;&lt;/li&gt;
+        &lt;li&gt;&lt;%= button_to "Sign out", sign_out_path, method: :delete, class: "w-full text-left" %&gt;&lt;/li&gt;
+      &lt;/ul&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+&lt;/div&gt;</code></pre>
+              </div>
+            </div>
+
+            <div>
+              <div class="flex items-center gap-3 mb-3">
+                <span class="chip chip-good">With phlexed</span>
+                <span class="text-xs text-base-content/50 font-mono">26 lines · composed Navbar</span>
+              </div>
+              <div class="code-card">
+                <div class="code-card-header">
+                  <span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span>
+                  <span class="ml-2 text-xs font-mono text-base-content/50">app/views/shared/nav.rb</span>
+                </div>
+<pre class="language-ruby"><code>module Shared
+  class Nav &lt; Views::Base
+    def initialize(user:, links:)
+      @user = user
+      @links = links
+    end
+
+    def view_template
+      render PhlexyUI::Navbar.new(bordered: true) do |nav|
+        nav.start { render PhlexyUI::Button.new(as: :a, variant: :ghost, href: "/", class: "text-xl") { "Acme" } }
+
+        nav.center do
+          render PhlexyUI::Menu.new(horizontal: true) do
+            @links.each { |l| li { a(href: l[:href]) { l[:label] } } }
+          end
+        end
+
+        nav.end_ do
+          render Shared::ThemeToggle.new
+          render PhlexyUI::Dropdown.new(align: :end) do |d|
+            d.trigger { render PhlexyUI::Avatar.new(src: @user.avatar_url, size: :sm, circle: true) }
+            d.content do
+              render PhlexyUI::Menu.new(size: :sm) do
+                li { a(href: profile_path) { "Profile" } }
+                li { a(href: settings_path) { "Settings" } }
+                li { button_to "Sign out", sign_out_path, method: :delete }
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+end</code></pre>
+              </div>
+            </div>
+          </div>
+          <div class="mt-6 grid md:grid-cols-3 gap-4 text-sm text-base-content/70">
+            <div class="flex gap-2"><span class="text-success">✓</span> Navbar slots replace navbar-start/center/end divs</div>
+            <div class="flex gap-2"><span class="text-success">✓</span> Dropdown + Avatar + Menu compose naturally</div>
+            <div class="flex gap-2"><span class="text-success">✓</span> Theme toggle is its own reusable component</div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== What it does ===== -->
+  <section class="py-20">
+    <div class="max-w-6xl mx-auto px-6">
+      <div class="text-center mb-14">
+        <div class="chip mb-4">Why it works</div>
+        <h2 class="text-4xl md:text-5xl font-extrabold tracking-tight">
+          The AI wasn&rsquo;t broken. <span class="gradient-text">It was blind.</span>
+        </h2>
+        <p class="mt-4 text-base-content/70 max-w-2xl mx-auto">
+          Phlex component libraries already exist. The AI just didn&rsquo;t know about them.
+          phlexed fixes that.
+        </p>
+      </div>
+
+      <div class="grid md:grid-cols-3 gap-6">
+        <div class="card bg-base-200/60 border border-base-300/60">
+          <div class="card-body">
+            <div class="w-10 h-10 rounded-lg bg-primary/15 text-primary flex items-center justify-center mb-2">
+              <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9.75 3.104v5.714a2.25 2.25 0 01-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 014.5 0m0 0v5.714c0 .597.237 1.17.659 1.591L19.8 15.3M14.25 3.104c.251.023.501.05.75.082M19.8 15.3l-1.57.393A9.065 9.065 0 0112 15a9.065 9.065 0 00-6.23-.693L5 14.5m14.8.8l1.402 1.402c1.232 1.232.65 3.318-1.067 3.611A48.309 48.309 0 0112 21c-2.773 0-5.491-.235-8.135-.687-1.718-.293-2.3-2.379-1.067-3.61L5 14.5"/></svg>
+            </div>
+            <h3 class="card-title text-xl">Component registry</h3>
+            <p class="text-base-content/70">
+              Scans your Phlex library and builds a structured index of every available component,
+              prop, variant, and example. Claude prompts get that context automatically.
+            </p>
+          </div>
+        </div>
+
+        <div class="card bg-base-200/60 border border-base-300/60">
+          <div class="card-body">
+            <div class="w-10 h-10 rounded-lg bg-secondary/15 text-secondary flex items-center justify-center mb-2">
+              <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 00-2.456 2.456z"/></svg>
+            </div>
+            <h3 class="card-title text-xl">Style registry</h3>
+            <p class="text-base-content/70">
+              Reads your DaisyUI themes, Tailwind config, and custom colors. Rules go into
+              CLAUDE.md so the AI stops writing <code class="text-xs bg-base-300 px-1 rounded">bg-blue-500</code>
+              when <code class="text-xs bg-base-300 px-1 rounded">bg-primary</code> exists.
+            </p>
+          </div>
+        </div>
+
+        <div class="card bg-base-200/60 border border-base-300/60">
+          <div class="card-body">
+            <div class="w-10 h-10 rounded-lg bg-accent/15 text-accent flex items-center justify-center mb-2">
+              <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M13.5 16.875h3.375m0 0h3.375m-3.375 0V13.5m0 3.375v3.375M6 10.5h2.25a2.25 2.25 0 002.25-2.25V6a2.25 2.25 0 00-2.25-2.25H6A2.25 2.25 0 003.75 6v2.25A2.25 2.25 0 006 10.5zm0 9.75h2.25A2.25 2.25 0 0010.5 18v-2.25a2.25 2.25 0 00-2.25-2.25H6a2.25 2.25 0 00-2.25 2.25V18A2.25 2.25 0 006 20.25zm9.75-9.75H18a2.25 2.25 0 002.25-2.25V6A2.25 2.25 0 0018 3.75h-2.25A2.25 2.25 0 0013.5 6v2.25a2.25 2.25 0 002.25 2.25z"/></svg>
+            </div>
+            <h3 class="card-title text-xl">Routing rules</h3>
+            <p class="text-base-content/70">
+              Injects routing into CLAUDE.md so &ldquo;build me a page&rdquo; automatically invokes
+              <code class="text-xs bg-base-300 px-1 rounded">/phlexed-build</code> with full context.
+              No copy-pasting prompts.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== Skills ===== -->
+  <section id="skills" class="py-20 bg-base-200/40 border-y border-base-300/60">
+    <div class="max-w-6xl mx-auto px-6">
+      <div class="text-center mb-14">
+        <div class="chip mb-4">Five skills, one install</div>
+        <h2 class="text-4xl md:text-5xl font-extrabold tracking-tight">
+          A skill for every <span class="gradient-text">Phlex moment</span>.
+        </h2>
+      </div>
+
+      <div class="grid md:grid-cols-2 gap-4">
+        <!-- setup -->
+        <div class="card bg-base-100 border border-base-300/60 hover:border-primary/40 transition">
+          <div class="card-body">
+            <div class="flex items-start justify-between">
+              <code class="text-primary font-mono font-bold">/phlexed-setup</code>
+              <span class="badge badge-ghost badge-sm">one-time</span>
+            </div>
+            <h3 class="card-title">Detect, index, configure</h3>
+            <p class="text-base-content/70 text-sm">
+              Detects your Phlex component library, scans it into a registry, reads your
+              DaisyUI/Tailwind config, and injects routing rules into CLAUDE.md.
+            </p>
+          </div>
+        </div>
+        <!-- build -->
+        <div class="card bg-base-100 border border-base-300/60 hover:border-primary/40 transition">
+          <div class="card-body">
+            <div class="flex items-start justify-between">
+              <code class="text-primary font-mono font-bold">/phlexed-build</code>
+              <span class="badge badge-ghost badge-sm">every day</span>
+            </div>
+            <h3 class="card-title">Generate a page or feature</h3>
+            <p class="text-base-content/70 text-sm">
+              Plans the layout, picks registered components, generates composed Phlex views.
+              Auto-invokes <code class="text-xs">/phlexed-component</code> if something&rsquo;s missing.
+            </p>
+          </div>
+        </div>
+        <!-- component -->
+        <div class="card bg-base-100 border border-base-300/60 hover:border-primary/40 transition">
+          <div class="card-body">
+            <div class="flex items-start justify-between">
+              <code class="text-primary font-mono font-bold">/phlexed-component</code>
+              <span class="badge badge-ghost badge-sm">as needed</span>
+            </div>
+            <h3 class="card-title">Create a new component</h3>
+            <p class="text-base-content/70 text-sm">
+              Reads your library&rsquo;s conventions, generates a new Phlex component following the
+              right patterns, adds tests, rebuilds the registry.
+            </p>
+          </div>
+        </div>
+        <!-- retrofit -->
+        <div class="card bg-base-100 border border-base-300/60 hover:border-primary/40 transition">
+          <div class="card-body">
+            <div class="flex items-start justify-between">
+              <code class="text-primary font-mono font-bold">/phlexed-retrofit</code>
+              <span class="badge badge-ghost badge-sm">migration</span>
+            </div>
+            <h3 class="card-title">Convert ERB → Phlex autonomously</h3>
+            <p class="text-base-content/70 text-sm">
+              Audits <code class="text-xs">app/views/</code>, batches by dependency, generates a Ralph loop,
+              then converts one view per iteration with atomic commits and preserved behavior.
+            </p>
+          </div>
+        </div>
+        <!-- theme -->
+        <div class="card bg-base-100 border border-base-300/60 hover:border-primary/40 transition md:col-span-2">
+          <div class="card-body">
+            <div class="flex items-start justify-between">
+              <code class="text-primary font-mono font-bold">/phlexed-theme</code>
+              <span class="badge badge-ghost badge-sm">design system</span>
+            </div>
+            <h3 class="card-title">Restyle without wrecking the design system</h3>
+            <p class="text-base-content/70 text-sm">
+              Switch DaisyUI themes, define custom themes, or restyle components — all
+              through props and theme config. Never inline styles. Never hardcoded colors. Audit mode
+              flags existing violations.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== How it works ===== -->
+  <section id="how" class="py-20">
+    <div class="max-w-6xl mx-auto px-6">
+      <div class="text-center mb-14">
+        <div class="chip mb-4">How it works</div>
+        <h2 class="text-4xl md:text-5xl font-extrabold tracking-tight">
+          Four steps from <span class="gradient-text">install to shipping</span>.
+        </h2>
+      </div>
+
+      <ol class="grid md:grid-cols-4 gap-6">
+        <li class="relative">
+          <div class="text-6xl font-extrabold text-primary/20">01</div>
+          <h3 class="mt-2 text-lg font-bold">Detect</h3>
+          <p class="mt-2 text-sm text-base-content/70">
+            phlexed reads <code class="text-xs">Gemfile.lock</code> and finds your installed Phlex component library.
+          </p>
+        </li>
+        <li class="relative">
+          <div class="text-6xl font-extrabold text-primary/20">02</div>
+          <h3 class="mt-2 text-lg font-bold">Index</h3>
+          <p class="mt-2 text-sm text-base-content/70">
+            Runs the right adapter, parses each component&rsquo;s props and variants, writes <code class="text-xs">.phlexed/registry.json</code>.
+          </p>
+        </li>
+        <li class="relative">
+          <div class="text-6xl font-extrabold text-primary/20">03</div>
+          <h3 class="mt-2 text-lg font-bold">Configure</h3>
+          <p class="mt-2 text-sm text-base-content/70">
+            Builds the style registry from your Tailwind config and appends routing + styling rules to <code class="text-xs">CLAUDE.md</code>.
+          </p>
+        </li>
+        <li class="relative">
+          <div class="text-6xl font-extrabold text-primary/20">04</div>
+          <h3 class="mt-2 text-lg font-bold">Prompt</h3>
+          <p class="mt-2 text-sm text-base-content/70">
+            &ldquo;Build me a settings page&rdquo; → Claude invokes <code class="text-xs">/phlexed-build</code> with full context and ships composed Phlex.
+          </p>
+        </li>
+      </ol>
+    </div>
+  </section>
+
+  <!-- ===== Install ===== -->
+  <section id="install" class="py-20 bg-base-200/40 border-t border-base-300/60">
+    <div class="max-w-4xl mx-auto px-6">
+      <div class="text-center mb-12">
+        <div class="chip mb-4">Install</div>
+        <h2 class="text-4xl md:text-5xl font-extrabold tracking-tight">
+          Two commands. <span class="gradient-text">Then you&rsquo;re done.</span>
+        </h2>
+        <p class="mt-4 text-base-content/70">
+          phlexed installs as a Claude Code skill system. No gem, no daemon, no dependencies beyond Ruby 3.0+.
+        </p>
+      </div>
+
+      <div class="space-y-6">
+        <div>
+          <div class="flex items-center gap-3 mb-2">
+            <span class="chip">1</span>
+            <span class="text-sm text-base-content/70">Clone + install globally</span>
+          </div>
+          <div class="code-card">
+            <div class="code-card-header">
+              <span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span>
+              <span class="ml-2 text-xs font-mono text-base-content/50">one-time, global</span>
+            </div>
+<pre class="language-bash"><code>git clone git@github.com:theinventor/phlexed.git ~/.claude/skills/phlexed
+cd ~/.claude/skills/phlexed
+./setup</code></pre>
+          </div>
+        </div>
+
+        <div>
+          <div class="flex items-center gap-3 mb-2">
+            <span class="chip">2</span>
+            <span class="text-sm text-base-content/70">In any Rails project with Phlex</span>
+          </div>
+          <div class="code-card">
+            <div class="code-card-header">
+              <span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span>
+              <span class="ml-2 text-xs font-mono text-base-content/50">inside Claude Code</span>
+            </div>
+<pre class="language-bash"><code>/phlexed-setup
+
+# That's it. Now try:
+# &gt; build me a settings page with a profile form</code></pre>
+          </div>
+        </div>
+      </div>
+
+      <div class="mt-10 flex flex-wrap justify-center gap-3">
+        <a href="https://github.com/theinventor/phlexed" class="btn btn-primary">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5"><path fill-rule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.009-.868-.014-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.02 10.02 0 0022 12.017C22 6.484 17.523 2 12 2z" clip-rule="evenodd"/></svg>
+          Star on GitHub
+        </a>
+        <a href="https://phlexyui.com/" class="btn btn-ghost">
+          PhlexyUI docs →
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== Footer ===== -->
+  <footer class="py-12 border-t border-base-300/60">
+    <div class="max-w-6xl mx-auto px-6 flex flex-col md:flex-row items-center justify-between gap-4 text-sm text-base-content/60">
+      <div class="flex items-center gap-2">
+        <span class="inline-block w-5 h-5 rounded bg-gradient-to-br from-primary to-secondary"></span>
+        <span class="font-bold text-base-content">phlexed</span>
+        <span class="text-base-content/40">·</span>
+        <span>MIT licensed</span>
+      </div>
+      <div class="flex items-center gap-5">
+        <a class="link-underline hover:text-primary" href="https://github.com/theinventor/phlexed">GitHub</a>
+        <a class="link-underline hover:text-primary" href="https://github.com/theinventor/phlexed/issues">Issues</a>
+        <a class="link-underline hover:text-primary" href="https://phlexyui.com/">PhlexyUI</a>
+        <a class="link-underline hover:text-primary" href="https://github.com/sean-yeoh/shadcn_phlexcomponents">shadcn_phlexcomponents</a>
+      </div>
+    </div>
+  </footer>
+
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-core.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+</body>
+</html>

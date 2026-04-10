@@ -1,0 +1,320 @@
+#!/usr/bin/env bash
+# phlexed setup — install the phlexed skill system to Claude Code.
+#
+# Symlinks (or copies) ./skill to ~/.claude/skills/phlexed/ so Claude Code
+# discovers every phlexed sub-skill via its skill directory scanner. Verifies
+# Ruby is available and prints next steps.
+#
+# Usage:
+#   ./setup                  # default: create a symlink
+#   ./setup --copy           # copy files instead of symlinking
+#   ./setup --force          # replace existing installation without asking
+#   ./setup --uninstall      # remove ~/.claude/skills/phlexed/
+#   ./setup --check          # report current installation status
+#   ./setup --help           # show help
+#
+# Re-running is safe: if phlexed is already symlinked to this repo, setup
+# is a no-op and prints the current status.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SKILL_SOURCE="$SCRIPT_DIR/skill"
+SKILL_TARGET="$HOME/.claude/skills/phlexed"
+
+# -----------------------------------------------------------------------------
+# Colors (only when stdout is a TTY — respects pipes and CI)
+# -----------------------------------------------------------------------------
+if [ -t 1 ]; then
+  BOLD=$'\033[1m'
+  DIM=$'\033[2m'
+  GREEN=$'\033[32m'
+  YELLOW=$'\033[33m'
+  RED=$'\033[31m'
+  RESET=$'\033[0m'
+else
+  BOLD="" DIM="" GREEN="" YELLOW="" RED="" RESET=""
+fi
+
+# -----------------------------------------------------------------------------
+# Option parsing
+# -----------------------------------------------------------------------------
+MODE="symlink"     # symlink | copy
+FORCE=false
+UNINSTALL=false
+CHECK_ONLY=false
+
+usage() {
+  cat <<EOF
+${BOLD}phlexed setup${RESET} — install the phlexed skill system for Claude Code
+
+Usage:
+  ./setup               Install (default: symlink this repo into ~/.claude/skills/phlexed/)
+  ./setup --copy        Copy files instead of symlinking
+  ./setup --force       Replace existing installation without asking
+  ./setup --uninstall   Remove ~/.claude/skills/phlexed/
+  ./setup --check       Report current installation status, do not change anything
+  ./setup --help        Show this help
+
+After install, run ${BOLD}/phlexed-setup${RESET} from any Rails project to configure
+phlexed for that project.
+EOF
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --help|-h) usage; exit 0 ;;
+    --copy) MODE="copy"; shift ;;
+    --force|-f) FORCE=true; shift ;;
+    --uninstall) UNINSTALL=true; shift ;;
+    --check) CHECK_ONLY=true; shift ;;
+    *) echo "${RED}error: unknown argument: $1${RESET}" >&2; usage >&2; exit 1 ;;
+  esac
+done
+
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
+info()    { printf "%s\n" "$1"; }
+success() { printf "${GREEN}✓${RESET} %s\n" "$1"; }
+warn()    { printf "${YELLOW}!${RESET} %s\n" "$1" >&2; }
+error()   { printf "${RED}✗${RESET} %s\n" "$1" >&2; }
+
+current_state() {
+  # Prints one of: missing | symlink_correct | symlink_wrong | directory
+  if [ ! -e "$SKILL_TARGET" ]; then
+    echo "missing"
+  elif [ -L "$SKILL_TARGET" ]; then
+    local target
+    target=$(readlink "$SKILL_TARGET")
+    if [ "$target" = "$SKILL_SOURCE" ]; then
+      echo "symlink_correct"
+    else
+      echo "symlink_wrong:$target"
+    fi
+  elif [ -d "$SKILL_TARGET" ]; then
+    echo "directory"
+  else
+    echo "unknown"
+  fi
+}
+
+confirm() {
+  # Prompt for [y/N], default no. Honors --force.
+  if [ "$FORCE" = true ]; then return 0; fi
+  local prompt="$1"
+  local answer
+  printf "%s [y/N] " "$prompt"
+  read -r answer
+  case "$answer" in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
+}
+
+# -----------------------------------------------------------------------------
+# Preflight: verify we're in a phlexed repo
+# -----------------------------------------------------------------------------
+if [ ! -d "$SKILL_SOURCE" ]; then
+  error "Cannot find skill/ directory at $SKILL_SOURCE"
+  error "Run this script from a cloned phlexed repository."
+  exit 1
+fi
+
+if [ ! -f "$SKILL_SOURCE/SKILL.md" ]; then
+  error "skill/SKILL.md is missing — this does not look like a complete phlexed repo"
+  exit 1
+fi
+
+# -----------------------------------------------------------------------------
+# --check mode: just report state and exit
+# -----------------------------------------------------------------------------
+if [ "$CHECK_ONLY" = true ]; then
+  info "${BOLD}phlexed status${RESET}"
+  info "  Repository:     $SCRIPT_DIR"
+  info "  Install target: $SKILL_TARGET"
+  state=$(current_state)
+  case "$state" in
+    missing)
+      info "  Status:         ${YELLOW}not installed${RESET}"
+      info "  Run: ./setup"
+      ;;
+    symlink_correct)
+      success "Status:         installed (symlinked to this repo)"
+      ;;
+    symlink_wrong:*)
+      target="${state#symlink_wrong:}"
+      warn "Status:         installed, but symlinked to a DIFFERENT repo:"
+      info "                $target"
+      info "  Run ./setup --force to replace with this repo"
+      ;;
+    directory)
+      warn "Status:         installed as a copy (not symlinked)"
+      info "  Run ./setup --force to replace with a symlink to this repo"
+      ;;
+  esac
+  exit 0
+fi
+
+# -----------------------------------------------------------------------------
+# --uninstall mode
+# -----------------------------------------------------------------------------
+if [ "$UNINSTALL" = true ]; then
+  state=$(current_state)
+  case "$state" in
+    missing)
+      info "phlexed is not installed. Nothing to do."
+      exit 0
+      ;;
+    symlink_correct|symlink_wrong:*)
+      if ! confirm "Remove the phlexed symlink at $SKILL_TARGET?"; then
+        info "Cancelled."
+        exit 0
+      fi
+      rm "$SKILL_TARGET"
+      success "Removed symlink: $SKILL_TARGET"
+      ;;
+    directory)
+      if ! confirm "Remove the phlexed directory at $SKILL_TARGET? This is a directory, not a symlink."; then
+        info "Cancelled."
+        exit 0
+      fi
+      rm -rf "$SKILL_TARGET"
+      success "Removed directory: $SKILL_TARGET"
+      ;;
+  esac
+  info ""
+  info "phlexed uninstalled. The repo at $SCRIPT_DIR is untouched — you can delete it manually."
+  exit 0
+fi
+
+# -----------------------------------------------------------------------------
+# Verify Ruby
+# -----------------------------------------------------------------------------
+if ! command -v ruby >/dev/null 2>&1; then
+  error "Ruby is not installed or not in PATH."
+  error "phlexed skills use Ruby for registry building and view scanning."
+  error "Install Ruby 3.0+ and re-run ./setup"
+  exit 1
+fi
+
+RUBY_VERSION=$(ruby -e 'puts RUBY_VERSION' 2>/dev/null || echo "unknown")
+RUBY_MAJOR=$(echo "$RUBY_VERSION" | cut -d. -f1)
+if [ "$RUBY_MAJOR" -lt 3 ] 2>/dev/null; then
+  warn "Ruby $RUBY_VERSION detected. phlexed is tested on Ruby 3.0+."
+  warn "Some adapters may behave unexpectedly on older Ruby versions."
+  if ! confirm "Continue anyway?"; then
+    info "Cancelled."
+    exit 1
+  fi
+fi
+
+# -----------------------------------------------------------------------------
+# Verify skill bin scripts are executable (best-effort)
+# -----------------------------------------------------------------------------
+BIN_DIR="$SKILL_SOURCE/bin"
+if [ -d "$BIN_DIR" ]; then
+  for bin in "$BIN_DIR"/*; do
+    if [ -f "$bin" ] && [ ! -x "$bin" ]; then
+      chmod +x "$bin" 2>/dev/null || true
+    fi
+  done
+fi
+
+# -----------------------------------------------------------------------------
+# Ensure ~/.claude/skills/ exists
+# -----------------------------------------------------------------------------
+mkdir -p "$HOME/.claude/skills"
+
+# -----------------------------------------------------------------------------
+# Install (or reinstall if something is already there)
+# -----------------------------------------------------------------------------
+state=$(current_state)
+
+case "$state" in
+  symlink_correct)
+    if [ "$MODE" = "copy" ]; then
+      # User explicitly wants a copy instead of the existing symlink.
+      if ! confirm "phlexed is symlinked. Replace with a copy?"; then
+        info "Cancelled."
+        exit 0
+      fi
+      rm "$SKILL_TARGET"
+    else
+      success "phlexed is already installed (symlinked to this repo)"
+      info ""
+      info "Ruby:     $RUBY_VERSION"
+      info "Source:   $SCRIPT_DIR"
+      info "Target:   $SKILL_TARGET"
+      info ""
+      info "${BOLD}Next steps:${RESET}"
+      info "  1. Change to a Rails project with Phlex installed"
+      info "  2. Run ${BOLD}/phlexed-setup${RESET} in Claude Code to build the registry for that project"
+      info ""
+      info "To reinstall fresh: ./setup --force"
+      info "To uninstall:       ./setup --uninstall"
+      exit 0
+    fi
+    ;;
+
+  symlink_wrong:*)
+    other_target="${state#symlink_wrong:}"
+    warn "phlexed is already installed, but symlinked to a different repo:"
+    warn "  $other_target"
+    if ! confirm "Replace it with a symlink to $SCRIPT_DIR?"; then
+      info "Cancelled. No changes made."
+      exit 0
+    fi
+    rm "$SKILL_TARGET"
+    ;;
+
+  directory)
+    warn "phlexed exists at $SKILL_TARGET as a copy (not a symlink)."
+    if ! confirm "Remove and replace?"; then
+      info "Cancelled. No changes made."
+      exit 0
+    fi
+    rm -rf "$SKILL_TARGET"
+    ;;
+
+  missing)
+    # Clean install — proceed.
+    ;;
+esac
+
+# -----------------------------------------------------------------------------
+# Perform the install
+# -----------------------------------------------------------------------------
+case "$MODE" in
+  symlink)
+    ln -s "$SKILL_SOURCE" "$SKILL_TARGET"
+    success "Symlinked $SKILL_TARGET → $SCRIPT_DIR/skill"
+    ;;
+  copy)
+    cp -R "$SKILL_SOURCE" "$SKILL_TARGET"
+    success "Copied skill/ to $SKILL_TARGET"
+    ;;
+esac
+
+# -----------------------------------------------------------------------------
+# Verify install: read the installed SKILL.md frontmatter
+# -----------------------------------------------------------------------------
+if [ ! -f "$SKILL_TARGET/SKILL.md" ]; then
+  error "Install verification failed: $SKILL_TARGET/SKILL.md is missing"
+  exit 1
+fi
+
+INSTALLED_NAME=$(grep -E '^name:' "$SKILL_TARGET/SKILL.md" | head -1 | cut -d: -f2 | tr -d ' ')
+INSTALLED_VERSION=$(grep -E '^version:' "$SKILL_TARGET/SKILL.md" | head -1 | cut -d: -f2 | tr -d ' ')
+
+info ""
+info "${BOLD}phlexed is ready.${RESET}"
+info ""
+info "  Ruby:        $RUBY_VERSION"
+info "  Installed:   $INSTALLED_NAME ${DIM}v${INSTALLED_VERSION}${RESET}"
+info "  Source:      $SCRIPT_DIR"
+info "  Target:      $SKILL_TARGET"
+info ""
+info "${BOLD}Next steps:${RESET}"
+info "  1. Change to a Rails project with Phlex installed"
+info "  2. Run ${BOLD}/phlexed-setup${RESET} in Claude Code to build the component registry"
+info ""
+info "${DIM}To see status at any time:   ./setup --check${RESET}"
+info "${DIM}To uninstall:                ./setup --uninstall${RESET}"

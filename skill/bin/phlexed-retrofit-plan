@@ -1,0 +1,474 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# phlexed-retrofit-plan — Build a batched conversion plan from a retrofit audit.
+#
+# Reads .phlexed/retrofit-audit.json (produced by phlexed-audit) and writes
+# .phlexed/retrofit-plan.json — the ordered plan for converting ERB/HAML/Slim
+# views to Phlex. Batching policy:
+#
+#   Batch 1  Shared partials    (convert first: they unblock downstream views)
+#   Batch 2  Layouts            (wrap pages — convert after shared components)
+#   Batch 3  Simple pages       (static HTML, no partials)
+#   Batch 4  Medium pages       (forms, partials, helpers)
+#   Batch 5  Complex pages      (manual review recommended)
+#
+# Also synthesizes `new_components_needed` — a list of shared partials that
+# have no matching registered component and should be created as Phlex
+# components during batch 1. Props are inferred from render call-site locals
+# and the partial's own instance variable references.
+#
+# Usage:
+#   phlexed-retrofit-plan                       # use default paths
+#   phlexed-retrofit-plan --project <path>
+#   phlexed-retrofit-plan --audit <path>
+#   phlexed-retrofit-plan --output <path>
+#   phlexed-retrofit-plan --check               # print summary, no file write
+#   phlexed-retrofit-plan --help
+
+require "json"
+require "pathname"
+require "optparse"
+require "time"
+require "set"
+require "fileutils"
+
+module Phlexed
+  module RetrofitPlan
+    # A partial is considered "shared" if it lives in app/views/shared/ OR
+    # is referenced by 2+ distinct views across the audit.
+    SHARED_USAGE_THRESHOLD = 2
+
+    class Planner
+      def initialize(audit:, project_root:)
+        @audit = audit
+        @project_root = Pathname.new(project_root).expand_path
+        @views = audit["views"] || []
+        @registry_components = extract_registry_components
+      end
+
+      def run
+        convertible = @views.reject { |v| v["already_phlex"] || v["skipped"] }
+        already_phlex = @views.select { |v| v["already_phlex"] }
+
+        dep_graph = build_dependency_graph(convertible)
+        shared_partials, layouts, pages = partition(convertible, dep_graph)
+
+        pages_by_complexity = pages.group_by { |v| v["complexity"] }
+
+        batches = []
+        batches << build_batch(
+          number: 1,
+          name: "Shared partials",
+          reason: "Convert shared partials first so downstream views can render them as Phlex components.",
+          views: shared_partials.sort_by { |v| -(dep_graph[v["path"]] || []).size }
+        ) if shared_partials.any?
+
+        batches << build_batch(
+          number: batches.size + 1,
+          name: "Layouts",
+          reason: "Layouts wrap every page. Convert after shared partials so the layout can reference them.",
+          views: layouts
+        ) if layouts.any?
+
+        if pages_by_complexity["simple"]&.any?
+          batches << build_batch(
+            number: batches.size + 1,
+            name: "Simple pages",
+            reason: "Static HTML with minimal Ruby logic. High success rate, fast iterations.",
+            views: pages_by_complexity["simple"].sort_by { |v| v["path"] }
+          )
+        end
+
+        if pages_by_complexity["medium"]&.any?
+          batches << build_batch(
+            number: batches.size + 1,
+            name: "Medium pages",
+            reason: "Views with partials, forms, or helper chains. Moderate conversion effort per view.",
+            views: pages_by_complexity["medium"].sort_by { |v| v["path"] }
+          )
+        end
+
+        if pages_by_complexity["complex"]&.any?
+          batches << build_batch(
+            number: batches.size + 1,
+            name: "Complex pages (manual review recommended)",
+            reason: "Stimulus controllers, raw HTML, deep helper chains, or nested form builders. Review each before conversion — some may need manual splits.",
+            views: pages_by_complexity["complex"].sort_by { |v| v["path"] }
+          )
+        end
+
+        # Assign batch number back to each view entry for downstream consumers
+        view_to_batch = {}
+        batches.each do |b|
+          b[:views].each { |v| view_to_batch[v[:path]] = b[:batch] }
+        end
+
+        new_components = synthesize_new_components(shared_partials, dep_graph)
+
+        {
+          planned_at: Time.now.utc.iso8601,
+          audit_file: ".phlexed/retrofit-audit.json",
+          project_root: @project_root.to_s,
+          registry: @audit["registry"] || {},
+          summary: {
+            total_convertible: convertible.size,
+            skipped_already_phlex: already_phlex.size,
+            total_batches: batches.size,
+            new_components_needed: new_components.size,
+            by_batch: batches.map { |b| { batch: b[:batch], name: b[:name], view_count: b[:view_count] } }
+          },
+          batches: batches,
+          new_components_needed: new_components
+        }
+      end
+
+      private
+
+      def extract_registry_components
+        # Support both shapes: the audit's embedded registry summary,
+        # or an external registry JSON if caller wants to pass one.
+        component_names = Set.new
+        if @audit["registry"].is_a?(Hash) && @audit["registry"]["components"]
+          @audit["registry"]["components"].each { |c| component_names << c["name"] if c["name"] }
+        end
+
+        # Also try to load .phlexed/registry.json directly for the full list
+        registry_path = @project_root.join(".phlexed/registry.json")
+        if registry_path.exist?
+          begin
+            reg = JSON.parse(File.read(registry_path))
+            (reg["components"] || []).each { |c| component_names << c["name"] if c["name"] }
+          rescue JSON::ParserError
+            # ignore — fall back to audit-embedded summary
+          end
+        end
+
+        component_names
+      end
+
+      # Build a reverse-dependency graph: partial_path -> [views that use it]
+      def build_dependency_graph(views)
+        graph = Hash.new { |h, k| h[k] = [] }
+        views.each do |view|
+          (view["dependencies"] || []).each do |dep|
+            graph[dep] << view["path"]
+          end
+        end
+        graph
+      end
+
+      # Split views into 3 buckets: shared_partials, layouts, pages
+      def partition(views, dep_graph)
+        shared_partials = []
+        layouts = []
+        pages = []
+
+        views.each do |view|
+          path = view["path"]
+          if path.start_with?("app/views/layouts/")
+            layouts << view
+          elsif shared_partial?(view, dep_graph)
+            shared_partials << view
+          else
+            pages << view
+          end
+        end
+
+        [shared_partials, layouts, pages]
+      end
+
+      def shared_partial?(view, dep_graph)
+        path = view["path"]
+        basename = File.basename(path)
+        is_partial = basename.start_with?("_")
+        return false unless is_partial
+
+        # Partials in app/views/shared/ are always shared
+        return true if path.start_with?("app/views/shared/")
+
+        # Otherwise, shared if referenced by SHARED_USAGE_THRESHOLD+ distinct views
+        (dep_graph[path] || []).uniq.size >= SHARED_USAGE_THRESHOLD
+      end
+
+      def build_batch(number:, name:, reason:, views:)
+        entries = views.map { |v| format_view_entry(v) }
+        {
+          batch: number,
+          name: name,
+          reason: reason,
+          view_count: entries.size,
+          views: entries
+        }
+      end
+
+      def format_view_entry(view)
+        {
+          path: view["path"],
+          engine: view["engine"],
+          complexity: view["complexity"],
+          lines: view["lines"],
+          component_matches: view["component_matches"] || [],
+          dependencies: view["dependencies"] || [],
+          conversion_notes: view["conversion_notes"]
+        }
+      end
+
+      # For each shared partial that doesn't map to an existing registered
+      # component, synthesize a suggestion: component name, usage count,
+      # suggested props.
+      def synthesize_new_components(shared_partials, dep_graph)
+        suggestions = []
+
+        shared_partials.each do |partial|
+          path = partial["path"]
+          suggested_name = component_name_from_partial_path(path)
+
+          # If the suggested name is already in the registry, skip
+          next if @registry_components.include?(suggested_name)
+
+          users = (dep_graph[path] || []).uniq
+          props = infer_props(partial, users)
+
+          suggestions << {
+            name: suggested_name,
+            source_partial: path,
+            used_by_count: users.size,
+            used_by: users.first(10),  # cap at 10 for readability
+            used_by_truncated: users.size > 10,
+            suggested_props: props,
+            create_in_batch: 1
+          }
+        end
+
+        # Sort by usage count descending — highest-leverage components first
+        suggestions.sort_by { |s| -s[:used_by_count] }
+      end
+
+      # _sidebar.html.erb → Sidebar
+      # app/views/shared/_top_nav.html.erb → TopNav
+      # _user_card.html.haml → UserCard
+      def component_name_from_partial_path(path)
+        basename = File.basename(path)
+        # Strip leading _ and all template extensions
+        name = basename.sub(/^_/, "")
+        name = name.sub(/\.(?:html\.)?(?:erb|haml|slim)$/, "")
+        name = name.sub(/\.turbo_stream\.erb$/, "")
+        # snake_case → PascalCase
+        name.split("_").map(&:capitalize).join
+      end
+
+      # Infer likely Phlex component props by:
+      # 1. Scanning render call sites for `locals: { foo: ..., bar: ... }`
+      # 2. Scanning the partial body for instance variable references (@foo)
+      # 3. Scanning the partial body for local variable references that
+      #    aren't helpers, ruby keywords, or scope-introduced bindings
+      def infer_props(partial, users)
+        partial_full_path = @project_root.join(partial["path"])
+        props = Set.new
+
+        # 2 + 3: scan the partial itself
+        if partial_full_path.exist?
+          begin
+            body = File.read(partial_full_path, encoding: "UTF-8")
+
+            # Instance variables — @user, @items
+            body.scan(/@(\w+)/).each { |m| props << m[0] }
+
+            # Scope-local bindings: names introduced by the partial itself that
+            # are NOT props. Excluding these avoids false positives like
+            # `_flash.html.erb` extracting `message` and `variant` from
+            # `flash.each do |type, message|` + `<% variant = ... %>` inside
+            # the block. Detected patterns:
+            #
+            #   |a, b, c|                    — block parameters (any engine)
+            #   <% foo = ... %>              — ERB local assignment
+            #   <% foo, bar = ... %>         — ERB parallel assignment
+            #   - foo = ...  (line-start)    — HAML/Slim local assignment
+            #   - foo, bar = ... (line-start) — HAML/Slim parallel assignment
+            #
+            # Any name introduced here gets added to a local blacklist for
+            # this partial's prop scan.
+            local_bindings = Set.new
+
+            # Block parameters: |a|, |a, b|, |a, b = default|, |*rest|, |&blk|
+            body.scan(/\|([^|]+)\|/).each do |match|
+              params_str = match[0]
+              # Strip default values, splats, block-capture sigils, and whitespace
+              params_str.split(",").each do |param|
+                name = param.strip.sub(/\A[*&]+/, "").split(/\s*=/).first
+                next if name.nil? || name.empty?
+                # Only collect simple lowercase identifiers (skip `self`, `_`, etc.)
+                local_bindings << name if name.match?(/\A[a-z_][a-z0-9_]*\z/)
+              end
+            end
+
+            # Top-level ERB local assignments: `<% foo = ... %>` or `<% foo, bar = ... %>`
+            # Use `<%` (not `<%=`) because assignments are statement-form.
+            # Match only `=` (not `==`, `=>`, `===`) via negative lookahead.
+            body.scan(/<%\s*([a-z_][a-z0-9_]*(?:\s*,\s*[a-z_][a-z0-9_]*)*)\s*=(?![=>])/).each do |match|
+              match[0].split(",").map(&:strip).each { |name| local_bindings << name }
+            end
+
+            # HAML/Slim statement-form assignments: `- foo = ...` or `- foo, bar = ...`
+            # at line start (after optional whitespace). Same negative lookahead
+            # to exclude `==`, `=>`, `===`.
+            body.scan(/^\s*-\s*([a-z_][a-z0-9_]*(?:\s*,\s*[a-z_][a-z0-9_]*)*)\s*=(?![=>])/).each do |match|
+              match[0].split(",").map(&:strip).each { |name| local_bindings << name }
+            end
+
+            # Local variable usage. Three extraction patterns, one per engine family:
+            #
+            # 1. ERB output expressions: `<%= foo %>` or `<%= foo.bar %>`
+            # 2. HAML/Slim output expressions at line start: `= foo` or `= foo.bar`
+            #    (after optional whitespace indent). Negative lookahead on `=`
+            #    excludes `==` (comparison) and `=>` / `===`. The line-start
+            #    anchor avoids matching `<%=` (ERB) since that has `<` before.
+            # 3. String interpolation common to all engines: `#{foo}` or `#{foo.bar}`
+            #
+            # Each match runs through the same blacklist filtering.
+            extract_prop = lambda do |name|
+              return if LOCAL_BLACKLIST.include?(name)
+              return if local_bindings.include?(name)
+              props << name
+            end
+
+            # 1. ERB output
+            body.scan(/<%=\s*([a-z_][a-z0-9_]*)\b/).each { |m| extract_prop.call(m[0]) }
+
+            # 2. HAML/Slim output at line start. Restrict to exactly one `=`
+            # (the `(?![=>])` negative lookahead blocks `==`/`=>`).
+            body.scan(/^\s*=(?![=>])\s*([a-z_][a-z0-9_]*)\b/).each { |m| extract_prop.call(m[0]) }
+
+            # 3. String interpolation (works across ERB, HAML, Slim, and any
+            # string context). `#{foo}` or `#{foo.bar}` — capture just `foo`.
+            body.scan(/#\{\s*([a-z_][a-z0-9_]*)\b/).each { |m| extract_prop.call(m[0]) }
+          rescue StandardError
+            # ignore unreadable partials
+          end
+        end
+
+        # 1: scan render call sites that specifically reference THIS partial
+        # and extract locals hash keys. Must match the partial's render ref
+        # (e.g. "shared/flash") to avoid picking up locals from calls that
+        # render other partials in the same user file.
+        partial_refs = render_refs_for(partial["path"])
+        users.each do |user_path|
+          full = @project_root.join(user_path)
+          next unless full.exist?
+          begin
+            body = File.read(full, encoding: "UTF-8")
+            body.each_line do |line|
+              next unless partial_refs.any? { |ref| line.include?("\"#{ref}\"") || line.include?("'#{ref}'") }
+              line.scan(/locals:\s*\{([^}]+)\}/).each do |match|
+                match[0].scan(/(\w+):/).each { |k| props << k[0] }
+              end
+            end
+          rescue StandardError
+            next
+          end
+        end
+
+        props.to_a.sort
+      end
+
+      # Convert a partial file path to the set of possible Rails render refs.
+      # app/views/shared/_flash.html.erb => ["shared/flash"]
+      # app/views/users/_card.html.erb   => ["users/card", "card"]
+      #   (same-dir refs drop the directory prefix)
+      def render_refs_for(partial_path)
+        parts = partial_path.sub(%r{^app/views/}, "").split("/")
+        basename = parts.pop.sub(/^_/, "").sub(/\.(?:html\.)?(?:erb|haml|slim)$/, "").sub(/\.turbo_stream\.erb$/, "")
+        refs = []
+        refs << (parts + [basename]).join("/") unless parts.empty?
+        refs << basename
+        refs << (parts + [basename]).join("/") if parts.empty?  # safety net
+        refs.uniq
+      end
+
+      LOCAL_BLACKLIST = Set.new(%w[
+        if unless else elsif end do yield return true false nil self
+        render link_to button_to form_with form_for form_tag image_tag
+        content_for content_tag url_for number_to_currency number_with_delimiter
+        time_ago_in_words pluralize truncate simple_format sanitize t
+        tag div span p a h1 h2 h3 h4 ul ol li table tr td th thead tbody
+        raw capture stylesheet_link_tag javascript_include_tag csrf_meta_tags
+        csp_meta_tag favicon_link_tag asset_path image_path
+      ]).freeze
+    end
+  end
+end
+
+# CLI entry point
+options = {
+  project: ".",
+  audit: nil,
+  output: ".phlexed/retrofit-plan.json",
+  check: false
+}
+
+OptionParser.new do |opts|
+  opts.banner = "Usage: phlexed-retrofit-plan [options]"
+  opts.on("--project PATH", "Project root (default: current directory)") { |v| options[:project] = v }
+  opts.on("--audit PATH", "Audit JSON path (default: <project>/.phlexed/retrofit-audit.json)") { |v| options[:audit] = v }
+  opts.on("--output PATH", "Output plan JSON path (default: .phlexed/retrofit-plan.json)") { |v| options[:output] = v }
+  opts.on("--check", "Print summary, do not write file") { options[:check] = true }
+  opts.on("-h", "--help", "Show help") { puts opts; exit }
+end.parse!
+
+project_root = File.expand_path(options[:project])
+
+unless Dir.exist?(project_root)
+  warn "error: project root does not exist: #{project_root}"
+  exit 1
+end
+
+audit_path = options[:audit] || File.join(project_root, ".phlexed/retrofit-audit.json")
+unless File.exist?(audit_path)
+  warn "error: audit file not found at #{audit_path}"
+  warn "Run `phlexed-audit` first to produce the audit JSON."
+  exit 1
+end
+
+begin
+  audit = JSON.parse(File.read(audit_path))
+rescue JSON::ParserError => e
+  warn "error: could not parse audit file: #{e.message}"
+  exit 1
+end
+
+planner = Phlexed::RetrofitPlan::Planner.new(audit: audit, project_root: project_root)
+plan = planner.run
+
+summary = plan[:summary]
+puts "Retrofit plan for #{project_root}"
+puts "  total_convertible:     #{summary[:total_convertible]}"
+puts "  skipped (already phlex): #{summary[:skipped_already_phlex]}"
+puts "  total_batches:         #{summary[:total_batches]}"
+puts "  new_components_needed: #{summary[:new_components_needed]}"
+puts
+puts "Batches:"
+summary[:by_batch].each do |b|
+  puts "  #{b[:batch]}. #{b[:name]} — #{b[:view_count]} view(s)"
+end
+
+if plan[:new_components_needed].any?
+  puts
+  puts "New components needed:"
+  plan[:new_components_needed].first(5).each do |c|
+    puts "  #{c[:name]} (from #{c[:source_partial]}, used by #{c[:used_by_count]})"
+  end
+  puts "  ..." if plan[:new_components_needed].size > 5
+end
+
+if options[:check]
+  puts
+  puts "(--check mode: not writing output file)"
+  exit 0
+end
+
+output_path = File.expand_path(options[:output], project_root)
+FileUtils.mkdir_p(File.dirname(output_path))
+File.write(output_path, JSON.pretty_generate(plan))
+puts
+puts "Plan written to #{options[:output]}"

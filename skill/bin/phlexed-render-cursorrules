@@ -1,0 +1,276 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# phlexed-render-cursorrules — Render a .cursorrules file for a phlexed project
+#
+# Reads .phlexed/registry.json and .phlexed/style-registry.json (if present) and
+# writes a plain-text .cursorrules at the project root. The rules file teaches
+# Cursor the available Phlex components, the project's design system vocabulary,
+# and the styling anti-patterns — the same context phlexed injects into CLAUDE.md
+# for Claude Code, reformatted for Cursor's plain-text convention.
+#
+# Marker comments (`# phlexed BEGIN` / `# phlexed END`) wrap the generated
+# section so re-runs are idempotent — any user-authored content outside the
+# markers is preserved verbatim.
+#
+# Usage:
+#   phlexed-render-cursorrules                   # read .phlexed/*.json, write .cursorrules
+#   phlexed-render-cursorrules --project PATH    # target a different Rails root
+#   phlexed-render-cursorrules --output FILE     # write to a non-default path
+#   phlexed-render-cursorrules --check           # print to stdout instead of writing
+#   phlexed-render-cursorrules --help
+#
+# Prerequisites: /phlexed-setup must have run at least once in the target project,
+# producing .phlexed/registry.json. Without it, the script exits with an error.
+
+require "json"
+require "optparse"
+require "time"
+
+# --- CLI parsing ---
+options = { project: ".", output: nil, check: false }
+OptionParser.new do |o|
+  o.banner = "Usage: phlexed-render-cursorrules [options]"
+  o.on("--project PATH", "Project root (default: current directory)") { |v| options[:project] = v }
+  o.on("--output FILE",  "Output path (default: <project>/.cursorrules)") { |v| options[:output] = v }
+  o.on("--check",        "Print to stdout, do not write file") { options[:check] = true }
+  o.on("-h", "--help",   "Show this help") do
+    puts o
+    puts
+    puts "Prerequisites: run /phlexed-setup in the target project first."
+    exit 0
+  end
+end.parse!
+
+project_root = File.expand_path(options[:project])
+unless Dir.exist?(project_root)
+  warn "error: project root does not exist: #{project_root}"
+  exit 1
+end
+
+registry_path = File.join(project_root, ".phlexed", "registry.json")
+style_path    = File.join(project_root, ".phlexed", "style-registry.json")
+output_path   = options[:output] || File.join(project_root, ".cursorrules")
+
+unless File.exist?(registry_path)
+  warn "error: #{registry_path} not found"
+  warn "       Run /phlexed-setup in the project first to build the registry."
+  exit 1
+end
+
+# --- Load registries ---
+registry = JSON.parse(File.read(registry_path))
+style = File.exist?(style_path) ? JSON.parse(File.read(style_path)) : nil
+
+library = registry["library"] || "custom"
+library_version = registry["version"] || "unknown"
+components = registry["components"] || []
+
+# --- Library namespace + canonical example lookup ---
+LIBRARY_NAMESPACE = {
+  "phlexy_ui"               => "PhlexyUI",
+  "shadcn_phlexcomponents"  => "ShadcnPhlexcomponents",
+  "custom"                  => nil
+}.freeze
+
+LIBRARY_DOC_URL = {
+  "phlexy_ui"              => "https://phlexyui.com/",
+  "shadcn_phlexcomponents" => "https://github.com/sean-yeoh/shadcn_phlexcomponents",
+  "custom"                 => nil
+}.freeze
+
+namespace = LIBRARY_NAMESPACE[library]
+doc_url = LIBRARY_DOC_URL[library]
+
+# --- Compact component listing ---
+# Each line summarizes one component: name + variant count + size count + example.
+# Keep it terse — .cursorrules is included in every Cursor conversation's context,
+# so every line is a token tax. Max 150 components to avoid blowing past Cursor's
+# effective context budget on huge libraries.
+#
+# As of v0.2, the registry may include a `source` field per component
+# ("library" or "local") populated by phlexed-registry's merge step. When local
+# components are present, partition the listing into separate sections so the
+# reader can see what's shared-library vs project-specific, and so name conflicts
+# can be flagged inline on the project-local component. v0.1 registries without
+# source tags fall back to a single flat listing (backward compat).
+def format_component_line(c)
+  name = c["name"]
+  parts = []
+  parts << "variants: #{c["variants"].first(6).join(", ")}" if c["variants"] && !c["variants"].empty?
+  parts << "sizes: #{c["sizes"].join(", ")}" if c["sizes"] && !c["sizes"].empty?
+  if c["subcomponents"] && !c["subcomponents"].empty?
+    parts << "subcomponents: #{c["subcomponents"].first(6).join(", ")}"
+  end
+  props_str = parts.empty? ? "" : " (#{parts.join("; ")})"
+  conflict_note = c["conflict"] ? " ⚠ name conflict with library component — consider renaming" : ""
+  "- #{name}#{props_str}#{conflict_note}"
+end
+
+# Partition by source. Library components come first (they're the shared
+# vocabulary users import from a gem); local components second (project-
+# specific, may have conflicts). Backward compat: if NO component has a
+# source field, treat the whole list as library-style (single section).
+any_tagged = components.any? { |c| c["source"] }
+library_components = any_tagged ? components.select { |c| c["source"] != "local" } : components
+local_components   = any_tagged ? components.select { |c| c["source"] == "local" } : []
+
+# Cap the listings at 150 components TOTAL (library + local) to stay within
+# Cursor's context budget. Library gets priority.
+library_cap = [library_components.size, 150].min
+remaining_budget = 150 - library_cap
+local_cap = [local_components.size, remaining_budget].min
+
+library_lines = library_components.first(library_cap).map { |c| format_component_line(c) }
+local_lines = local_components.first(local_cap).map { |c| format_component_line(c) }
+
+truncated = components.size > 150
+local_conflicts = local_components.count { |c| c["conflict"] }
+
+# --- Compose the .cursorrules content ---
+generated_at = Time.now.utc.iso8601
+
+header = <<~HEADER
+  # phlexed BEGIN
+  # Generated by phlexed-render-cursorrules on #{generated_at}
+  # Source: .phlexed/registry.json (library: #{library} v#{library_version})#{style ? ", .phlexed/style-registry.json (#{style["design_system"]} v#{style["version"]})" : ""}
+  #
+  # Regenerate after: upgrading your Phlex component gem, editing tailwind.config,
+  # or running /phlexed-setup again. Command:
+  #
+  #   ruby ~/.claude/skills/phlexed/bin/phlexed-render-cursorrules
+  #
+  # Any content outside the phlexed BEGIN/END markers is preserved on re-runs.
+HEADER
+
+namespace_bullet =
+  if namespace
+    "- Respect the library namespace: `#{namespace}::Button` (not `Button`). The\n" \
+    "  component listing below uses short names for brevity; prepend `#{namespace}::`\n" \
+    "  when calling."
+  else
+    ""
+  end
+
+rules_section = <<~RULES
+
+  ## Phlex conventions
+
+  This Rails project uses Phlex for views. Do not write ERB, HAML, or Slim — all
+  new views and components are Phlex Ruby classes.
+
+  Before writing any view or component, consult the "Available components" section
+  below. Compose pages from registered components; do not inline raw HTML when a
+  component already exists for the pattern.
+
+  - Use `render #{namespace || "MyApp"}::Foo.new(prop: value) { ... }` composition, not
+    `div(class: "...")` inlining.
+  - Follow the component library's variant/size naming exactly. `variant: :primary`
+    beats `class: "btn-primary"`. The library's prop DSL is the canonical interface.
+  - If a pattern has no matching component, create a new Phlex class following the
+    library's conventions. Do not open-code a new pattern inline.
+  #{namespace_bullet}
+
+  ## Available components
+
+  Library: #{library}#{library_version == "unknown" ? "" : " v#{library_version}"}#{doc_url ? " · #{doc_url}" : ""}
+  #{components.size} component#{components.size == 1 ? "" : "s"} registered#{any_tagged && !local_components.empty? ? " (#{library_components.size} from library, #{local_components.size} project-local)" : ""}.#{truncated ? " (showing first 150)" : ""}
+
+RULES
+
+# Append component listings outside the heredoc so the joins don't interact
+# with heredoc indent stripping — each line starts flush left at column 0.
+if local_lines.empty?
+  # Flat listing — either no local components or v0.1 untagged registry.
+  rules_section += library_lines.join("\n") + "\n"
+else
+  # Partitioned listing with two sub-headings.
+  rules_section += "### From library (#{library})\n"
+  rules_section += library_lines.join("\n") + "\n"
+  rules_section += "\n### Project-local (app/components, app/views)\n"
+  if local_conflicts > 0
+    rules_section += "#{local_conflicts} component#{local_conflicts == 1 ? "" : "s"} conflict with library names — consider renaming to disambiguate.\n\n"
+  end
+  rules_section += local_lines.join("\n") + "\n"
+end
+
+# If style registry is available, append design system guidance.
+style_section = ""
+if style
+  design_system = style["design_system"] || "unknown"
+  ds_version = style["version"] || "unknown"
+  active_theme = (style["themes"] || {})["active"] || "unknown"
+  themes_available = (style["themes"] || {})["available"] || []
+  anti_patterns = style["anti_patterns"] || []
+
+  style_section = <<~STYLE
+
+    ## Design system
+
+    This project uses #{design_system}#{ds_version == "unknown" ? "" : " v#{ds_version}"}. Active theme: `#{active_theme}`.#{themes_available.size > 1 ? " Available themes: #{themes_available.first(8).join(", ")}#{themes_available.size > 8 ? ", ..." : ""}." : ""}
+
+    ## Styling rules
+
+    - Use component props for styling (`variant: :primary`, `size: :lg`), not raw
+      CSS classes. The library maps props to the correct #{design_system} classes.
+    - Use #{design_system} semantic colors (`bg-primary`, `text-base-content`),
+      never hardcoded values (`bg-blue-500`, `text-#333`). Semantic colors respect
+      theme switching.
+    - Use #{design_system} component classes (`btn`, `card`, `badge`) when no Phlex
+      component exists. Do not recreate them with Tailwind utilities.
+    - Never add inline `style=""` attributes to Phlex components.
+    - Never create custom CSS files when the design system can handle it. If a new
+      color or utility is needed, add it as a theme extension in `tailwind.config.js`,
+      not as a one-off class.
+    - When switching themes, update `<html data-theme="...">` in the layout, not
+      per-component overrides.
+
+    ## Anti-patterns (do NOT do these)
+
+  STYLE
+  style_section += anti_patterns.first(12).map { |ap| "- #{ap}" }.join("\n") + "\n"
+end
+
+footer = <<~FOOTER
+
+  ## When in doubt
+
+  Check `.phlexed/registry.json` for the full component surface (including props
+  not listed above) and `.phlexed/style-registry.json` for the full design system
+  vocabulary. These files are regenerated by `/phlexed-setup` in Claude Code or
+  the `phlexed-registry` bin script, and are the source of truth.
+
+  # phlexed END
+FOOTER
+
+generated_content = header + rules_section + style_section + footer
+
+# --- Merge with existing .cursorrules, preserving user content ---
+# If a .cursorrules file already exists, look for BEGIN/END markers and replace
+# just that section. Otherwise, write the generated content as-is.
+BEGIN_MARKER = "# phlexed BEGIN"
+END_MARKER   = "# phlexed END"
+
+final_content =
+  if File.exist?(output_path) && !options[:check]
+    existing = File.read(output_path)
+    if existing.include?(BEGIN_MARKER) && existing.include?(END_MARKER)
+      # Replace the phlexed section, preserve everything else
+      before = existing.split(BEGIN_MARKER, 2).first
+      after  = existing.split(END_MARKER, 2).last
+      (before.to_s + generated_content + after.to_s)
+    else
+      # User has an existing .cursorrules without phlexed markers — append rather than overwrite
+      existing.rstrip + "\n\n" + generated_content
+    end
+  else
+    generated_content
+  end
+
+if options[:check]
+  puts generated_content
+  exit 0
+end
+
+File.write(output_path, final_content)
+puts "Wrote #{output_path} (#{components.size} components, #{style ? style["design_system"] : "no style registry"})"

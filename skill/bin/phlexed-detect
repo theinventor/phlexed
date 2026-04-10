@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# phlexed-detect — Detect which Phlex component library is installed
+# Reads Gemfile.lock and identifies: phlexy_ui, shadcn_phlexcomponents, protos, ruby_ui
+# Outputs: library name to stdout, or "none" if no known library found
+# Also detects if phlex itself is present (required dependency)
+set -euo pipefail
+
+LOCKFILE="${1:-Gemfile.lock}"
+
+if [ ! -f "$LOCKFILE" ]; then
+  echo "error: No Gemfile.lock found at $LOCKFILE" >&2
+  echo "none"
+  exit 1
+fi
+
+# Check for phlex itself first
+if ! grep -q '^\s*phlex\s' "$LOCKFILE" 2>/dev/null; then
+  echo "error: phlex gem not found in $LOCKFILE" >&2
+  echo "none"
+  exit 1
+fi
+
+# Known Phlex component libraries in priority order
+LIBRARIES=(
+  "phlexy_ui"
+  "shadcn_phlexcomponents"
+  "protos"
+  "ruby_ui"
+)
+
+DETECTED=""
+for lib in "${LIBRARIES[@]}"; do
+  if grep -q "^\s*${lib}\s" "$LOCKFILE" 2>/dev/null; then
+    if [ -z "$DETECTED" ]; then
+      DETECTED="$lib"
+    else
+      # Multiple libraries found — report both but return first
+      echo "info: also found $lib" >&2
+    fi
+  fi
+done
+
+if [ -n "$DETECTED" ]; then
+  echo "$DETECTED"
+else
+  # No known library, but phlex is present — check for custom components
+  if [ -d "app/views/components" ] || [ -d "app/components" ]; then
+    echo "custom"
+  else
+    echo "none"
+  fi
+fi

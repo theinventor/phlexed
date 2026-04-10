@@ -1,0 +1,228 @@
+#!/usr/bin/env bash
+# phlexed-registry — Build a component registry for the current Rails project
+#
+# Orchestrates library detection + adapter invocation to produce .phlexed/registry.json
+#
+# Usage:
+#   phlexed-registry                   # auto-detect library, build registry
+#   phlexed-registry --adapter phlexy_ui  # force a specific adapter
+#   phlexed-registry --check           # check if registry exists and is fresh
+#   phlexed-registry --help            # show help
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ADAPTER_DIR="$SCRIPT_DIR/../adapters"
+DETECT_BIN="$SCRIPT_DIR/phlexed-detect"
+REGISTRY_PATH=".phlexed/registry.json"
+
+usage() {
+  cat <<EOF
+phlexed-registry — Build a Phlex component registry
+
+Usage:
+  phlexed-registry                       Auto-detect library and build registry
+  phlexed-registry --adapter <name>      Force a specific adapter (phlexy_ui|shadcn_phlexcomponents|generic)
+  phlexed-registry --library-only        Skip merging local app/components (library only)
+  phlexed-registry --check               Report registry freshness vs Gemfile.lock
+  phlexed-registry --help                Show this help
+
+Output: .phlexed/registry.json in the current project
+
+When a library adapter runs (phlexy_ui / shadcn_phlexcomponents), phlexed-registry
+also scans app/components/ and app/views/ for custom Phlex::HTML subclasses via
+the generic adapter, then merges both into one registry with a per-component
+"source" field ("library" or "local"). Pass --library-only to skip the scan.
+EOF
+}
+
+check_staleness() {
+  if [ ! -f "$REGISTRY_PATH" ]; then
+    echo "STATUS: missing"
+    echo "Registry does not exist at $REGISTRY_PATH"
+    return 1
+  fi
+
+  if [ ! -f "Gemfile.lock" ]; then
+    echo "STATUS: no_lockfile"
+    echo "No Gemfile.lock to compare against"
+    return 0
+  fi
+
+  # Compare mtimes (portable across BSD/GNU stat)
+  LOCK_MTIME=$(stat -f %m Gemfile.lock 2>/dev/null || stat -c %Y Gemfile.lock)
+  REG_MTIME=$(stat -f %m "$REGISTRY_PATH" 2>/dev/null || stat -c %Y "$REGISTRY_PATH")
+
+  if [ "$LOCK_MTIME" -gt "$REG_MTIME" ]; then
+    echo "STATUS: stale"
+    echo "Gemfile.lock is newer than registry. Run: phlexed-registry"
+    return 1
+  else
+    echo "STATUS: fresh"
+    echo "Registry is up to date"
+    return 0
+  fi
+}
+
+# Parse args
+ADAPTER=""
+LIBRARY_ONLY=false
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --help|-h) usage; exit 0 ;;
+    --check) check_staleness; exit $? ;;
+    --adapter) ADAPTER="$2"; shift 2 ;;
+    --library-only) LIBRARY_ONLY=true; shift ;;
+    *) echo "error: unknown arg: $1" >&2; usage; exit 1 ;;
+  esac
+done
+
+# Verify we're in a Rails project
+if [ ! -f "Gemfile.lock" ]; then
+  echo "error: No Gemfile.lock in current directory. Run from a Rails project root." >&2
+  exit 1
+fi
+
+# Auto-detect if no adapter specified
+if [ -z "$ADAPTER" ]; then
+  if [ ! -x "$DETECT_BIN" ]; then
+    echo "error: phlexed-detect not found or not executable at $DETECT_BIN" >&2
+    exit 1
+  fi
+  ADAPTER=$("$DETECT_BIN" Gemfile.lock)
+
+  if [ "$ADAPTER" = "none" ]; then
+    echo "error: No Phlex component library detected in Gemfile.lock" >&2
+    echo "Supported libraries: phlexy_ui, shadcn_phlexcomponents, protos, ruby_ui" >&2
+    echo "Or: --adapter generic  to scan app/components/ for custom components" >&2
+    exit 1
+  fi
+
+  if [ "$ADAPTER" = "custom" ]; then
+    ADAPTER="generic"
+  fi
+fi
+
+echo "Using adapter: $ADAPTER"
+
+ADAPTER_FILE="$ADAPTER_DIR/${ADAPTER}.rb"
+if [ ! -f "$ADAPTER_FILE" ]; then
+  echo "error: Adapter not found: $ADAPTER_FILE" >&2
+  echo "Available adapters:" >&2
+  # `find -exec basename` avoids the `ls | xargs` filename-safety pitfall.
+  find "$ADAPTER_DIR" -maxdepth 1 -name '*.rb' -exec basename {} .rb \; 2>/dev/null | sed 's/^/  /' >&2
+  exit 1
+fi
+
+# Find the gem path (unless generic)
+if [ "$ADAPTER" = "generic" ]; then
+  GEM_PATH="$(pwd)"
+else
+  GEM_PATH=$(bundle show "$ADAPTER" 2>/dev/null || true)
+  if [ -z "$GEM_PATH" ] || [ ! -d "$GEM_PATH" ]; then
+    echo "error: Could not locate gem '$ADAPTER' via bundle. Is it in your Gemfile?" >&2
+    exit 1
+  fi
+  echo "Gem path: $GEM_PATH"
+fi
+
+# Ensure .phlexed/ exists
+mkdir -p .phlexed
+
+# Run the primary adapter.
+# If the primary is generic (no library detected), it writes straight to
+# REGISTRY_PATH and we're done — no merge step because the generic scan IS
+# the whole story.
+# If the primary is a library (phlexy_ui/shadcn) we always go through the
+# merge pipeline for schema consistency: tag every component with source,
+# add has_local_components + local_components metadata. The only thing
+# --library-only changes is whether we also run generic.rb against the
+# project root — if set, local_components stays [].
+PRIMARY_OUTPUT="$REGISTRY_PATH"
+if [ "$ADAPTER" != "generic" ]; then
+  PRIMARY_OUTPUT=".phlexed/.registry-library.json"
+fi
+
+ruby "$ADAPTER_FILE" "$GEM_PATH" "$PRIMARY_OUTPUT"
+
+if [ ! -f "$PRIMARY_OUTPUT" ]; then
+  echo "error: Adapter did not produce $PRIMARY_OUTPUT" >&2
+  exit 1
+fi
+
+# Generic primary: no merge needed, registry is already at REGISTRY_PATH.
+if [ "$ADAPTER" = "generic" ]; then
+  echo "Registry ready at $REGISTRY_PATH"
+  exit 0
+fi
+
+# Library primary: run generic.rb against the project root to pick up any
+# custom Phlex components in app/components, app/views/components, etc.
+# (skipped if --library-only was passed).
+# This is the v0.2 "merged multi-adapter registries" feature — a project
+# with both PhlexyUI AND custom components now gets both indexed so
+# /phlexed-build can compose from either.
+LOCAL_OUTPUT=""
+if [ "$LIBRARY_ONLY" = false ]; then
+  LOCAL_OUTPUT=".phlexed/.registry-local.json"
+  ruby "$ADAPTER_DIR/generic.rb" "$(pwd)" "$LOCAL_OUTPUT" >/dev/null 2>&1 || true
+fi
+
+# Merge (or just tag, if --library-only). Inline ruby heredoc keeps the
+# orchestration in one file and avoids a separate merge helper binary.
+# Single-quoted heredoc so shell variable expansion doesn't interfere with
+# Ruby sigils — paths are passed in via environment variables.
+PRIMARY_OUTPUT="$PRIMARY_OUTPUT" \
+LOCAL_OUTPUT="$LOCAL_OUTPUT" \
+REGISTRY_PATH="$REGISTRY_PATH" \
+ruby -rjson - <<'RUBY'
+primary_path = ENV.fetch("PRIMARY_OUTPUT")
+local_path   = ENV.fetch("LOCAL_OUTPUT", "")
+output_path  = ENV.fetch("REGISTRY_PATH")
+
+primary = JSON.parse(File.read(primary_path))
+primary_components = primary["components"] || []
+primary_components.each { |c| c["source"] ||= "library" }
+
+local_components = []
+if !local_path.empty? && File.exist?(local_path)
+  local = JSON.parse(File.read(local_path))
+  local_components = (local["components"] || []).map do |c|
+    c.merge("source" => "local")
+  end
+end
+
+# Detect name conflicts — same short name in both library and local. Library
+# wins (it's the shared dependency that multiple projects rely on). Local
+# components with conflicting names get a "conflict" flag so downstream skills
+# can warn the user to rename.
+library_names = primary_components.map { |c| c["name"] }
+local_components.each do |c|
+  c["conflict"] = true if library_names.include?(c["name"])
+end
+
+merged = primary.dup
+merged["components"] = primary_components + local_components
+merged["component_count"] = merged["components"].size
+merged["has_local_components"] = !local_components.empty?
+merged["local_components"] = {
+  "count" => local_components.size,
+  "conflicts" => local_components.count { |c| c["conflict"] },
+}
+
+File.write(output_path, JSON.pretty_generate(merged))
+
+lib_count = primary_components.size
+loc_count = local_components.size
+conflicts = merged["local_components"]["conflicts"]
+
+if loc_count.zero?
+  note = local_path.empty? ? "--library-only, local scan skipped" : "no local components found"
+  puts "Registry ready at #{output_path} (#{lib_count} library components; #{note})"
+else
+  conflict_note = conflicts.zero? ? "" : ", #{conflicts} name conflict#{conflicts == 1 ? "" : "s"} flagged"
+  puts "Registry ready at #{output_path} (#{lib_count} library + #{loc_count} local components#{conflict_note})"
+end
+RUBY
+
+# Clean up the intermediate files — they're noise if the user inspects .phlexed/
+rm -f ".phlexed/.registry-library.json" ".phlexed/.registry-local.json"

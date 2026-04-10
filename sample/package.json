@@ -1,0 +1,11 @@
+{
+  "name": "phlexed-sample",
+  "version": "0.1.0",
+  "description": "Minimal Rails 8 + PhlexyUI sample app used to exercise every phlexed skill end to end.",
+  "private": true,
+  "devDependencies": {
+    "daisyui": "^4.12.10",
+    "tailwindcss": "^3.4.0",
+    "@tailwindcss/typography": "^0.5.15"
+  }
+}

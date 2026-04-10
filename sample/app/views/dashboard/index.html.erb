@@ -1,0 +1,52 @@
+<h1 class="text-3xl font-bold mb-6">Dashboard</h1>
+
+<div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+  <div class="stats shadow bg-base-100">
+    <div class="stat">
+      <div class="stat-title">Total users</div>
+      <div class="stat-value text-primary"><%= @stats&.fetch(:users, 1204) %></div>
+      <div class="stat-desc">↗︎ 12% this month</div>
+    </div>
+  </div>
+  <div class="stats shadow bg-base-100">
+    <div class="stat">
+      <div class="stat-title">Revenue</div>
+      <div class="stat-value text-secondary">$<%= @stats&.fetch(:revenue, "12,400") %></div>
+      <div class="stat-desc">↗︎ 8% MoM</div>
+    </div>
+  </div>
+  <div class="stats shadow bg-base-100">
+    <div class="stat">
+      <div class="stat-title">Conversion</div>
+      <div class="stat-value text-accent"><%= @stats&.fetch(:conversion, "4.2%") %></div>
+      <div class="stat-desc">↗︎ 0.3% this week</div>
+    </div>
+  </div>
+</div>
+
+<div class="card card-bordered bg-base-100">
+  <div class="card-body">
+    <h2 class="card-title">Recent activity</h2>
+    <table class="table table-zebra">
+      <thead>
+        <tr>
+          <th>User</th>
+          <th>Action</th>
+          <th>When</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% (@activities || []).each do |activity| %>
+          <tr>
+            <td><%= activity.user_name %></td>
+            <td><%= activity.action %></td>
+            <td><%= time_ago_in_words(activity.created_at) %> ago</td>
+          </tr>
+        <% end %>
+      </tbody>
+    </table>
+    <div class="card-actions justify-end">
+      <%= link_to "View all", "#", class: "btn btn-primary btn-sm" %>
+    </div>
+  </div>
+</div>

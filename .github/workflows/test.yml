@@ -1,0 +1,79 @@
+# phlexed CI — runs the adapter regression suite on every push and pull request.
+#
+# Uses `./scripts/test-adapters.sh --quick` which runs 21 offline assertions
+# against the committed sample/ fixture. The full suite (`./scripts/test-adapters.sh`
+# with no flag) also runs 18 online assertions that clone real phlexy_ui and
+# shadcn_phlexcomponents sources from GitHub — those are intentionally skipped in
+# CI because upstream repo changes or rate-limit blips would cause false failures
+# unrelated to the PR under review. Run the full suite locally before sending a PR.
+
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel in-progress runs when a new commit is pushed to the same PR or branch.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Adapter regression suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          # Ruby 3.3 matches sample/Gemfile's declared ruby version and is
+          # compatible with both phlexy_ui (requires 3.2+) and the adapter
+          # scripts themselves.
+          ruby-version: "3.3"
+          bundler-cache: false
+
+      - name: Lint shell scripts (shellcheck)
+        # Statically analyzes every bash script in the repo for common
+        # pitfalls: unquoted variables, unused locals, bashism-vs-POSIX
+        # portability issues, subshell gotchas. Ubuntu runners have
+        # shellcheck preinstalled via apt so no setup step needed. All
+        # intentional false-positive exemptions (e.g., SC2059 for
+        # printf-with-color-vars, SC2329 for trap-invoked cleanup) are
+        # declared via `# shellcheck disable=CODE` comments at the top
+        # of each file with a rationale.
+        run: |
+          shellcheck \
+            ./setup \
+            ./skill/bin/phlexed-detect \
+            ./skill/bin/phlexed-registry \
+            ./scripts/test-adapters.sh \
+            ./scripts/test-installer.sh
+
+      - name: Run offline regression suite
+        run: ./scripts/test-adapters.sh --quick
+
+      - name: Run installer lifecycle test
+        # Uses a fake HOME so the CI runner's real ~/.claude/ is never touched.
+        # Covers 24 assertions: clean-state detection, default symlink install,
+        # bin scripts through the install, idempotent re-run, --copy --force
+        # directory install, --force symlink replacement, --uninstall, and
+        # argument parsing edge cases (--help, unknown flag).
+        run: ./scripts/test-installer.sh
+
+      - name: Verify working tree is clean after test
+        # The test script's cleanup trap should remove sample/.phlexed and any
+        # /tmp scratch dirs. If anything leaked into tracked paths, git status
+        # will report it and this step fails.
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::Test run left uncommitted changes in the working tree:"
+            git status --porcelain
+            exit 1
+          fi

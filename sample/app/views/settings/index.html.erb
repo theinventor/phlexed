@@ -1,0 +1,40 @@
+<h1 class="text-3xl font-bold mb-6">Settings</h1>
+
+<div class="card card-bordered bg-base-100 max-w-2xl">
+  <div class="card-body">
+    <h2 class="card-title">Profile</h2>
+    <p class="text-base-content/70">Update your public profile information.</p>
+
+    <%= form_with model: @user, url: settings_path, method: :patch, local: true do |f| %>
+      <div class="form-control">
+        <%= f.label :name, class: "label" %>
+        <%= f.text_field :name, class: "input input-bordered w-full" %>
+      </div>
+
+      <div class="form-control">
+        <%= f.label :email, class: "label" %>
+        <%= f.email_field :email, class: "input input-bordered w-full" %>
+      </div>
+
+      <div class="form-control">
+        <%= f.label :bio, class: "label" %>
+        <%= f.text_area :bio, class: "textarea textarea-bordered w-full", rows: 4 %>
+        <label class="label">
+          <span class="label-text-alt text-base-content/60">Max 200 characters</span>
+        </label>
+      </div>
+
+      <div class="form-control">
+        <label class="label cursor-pointer">
+          <span class="label-text">Receive email notifications</span>
+          <%= f.check_box :notifications_enabled, class: "toggle toggle-primary" %>
+        </label>
+      </div>
+
+      <div class="card-actions justify-end mt-4">
+        <%= link_to "Cancel", root_path, class: "btn btn-ghost" %>
+        <%= f.submit "Save changes", class: "btn btn-primary" %>
+      </div>
+    <% end %>
+  </div>
+</div>

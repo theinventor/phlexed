@@ -1,0 +1,6 @@
+<% flash.each do |type, message| %>
+  <% variant = { "notice" => "info", "alert" => "error", "success" => "success", "warning" => "warning" }[type.to_s] || "info" %>
+  <div class="alert alert-<%= variant %> mb-4" role="alert">
+    <span><%= message %></span>
+  </div>
+<% end %>

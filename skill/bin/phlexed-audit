@@ -1,0 +1,440 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# phlexed-audit — Scan a Rails app's views for retrofit conversion targets.
+#
+# Walks app/views/ for ERB/HAML/Slim templates, classifies each by complexity,
+# maps pattern hints against the component registry, traces shared partial
+# dependencies, and writes .phlexed/retrofit-audit.json.
+#
+# Also scans app/components/ and app/views/components/ for existing Phlex
+# classes so they're flagged as already-converted.
+#
+# Usage:
+#   phlexed-audit                          # scan current project
+#   phlexed-audit --project <path>         # scan a specific project
+#   phlexed-audit --output <path>          # write audit JSON elsewhere
+#   phlexed-audit --registry <path>        # use a specific registry JSON
+#   phlexed-audit --check                  # print summary, do not write file
+#   phlexed-audit --help                   # show help
+
+require "json"
+require "pathname"
+require "optparse"
+require "time"
+require "set"
+require "fileutils"
+
+module Phlexed
+  module Audit
+    # Maximum file size we'll try to parse. Anything bigger is flagged as
+    # complex without attempting full analysis.
+    MAX_SIZE_BYTES = 200_000
+
+    # Known template extensions we can convert.
+    TEMPLATE_EXTENSIONS = %w[
+      .html.erb .html.haml .html.slim
+      .erb .haml .slim
+      .turbo_stream.erb
+    ].freeze
+
+    # Component class hint patterns: regexes over raw template source →
+    # component category keyword. Used to suggest which registry components
+    # a view will need. Intentionally broad — false positives are cheap,
+    # false negatives force unnecessary manual review.
+    CLASS_HINTS = {
+      # PhlexyUI / DaisyUI class patterns
+      "Button"      => /\b(btn|btn-primary|btn-secondary|btn-ghost|btn-outline)\b|<button\b/i,
+      "Card"        => /\bcard(-bordered|-compact|-body|-title|-actions)?\b/i,
+      "Alert"       => /\balert(-info|-success|-warning|-error)?\b/i,
+      "Badge"       => /\bbadge(-primary|-secondary|-success|-error|-warning|-neutral)?\b/i,
+      "Modal"       => /\bmodal(-box|-action)?\b|<dialog\b/i,
+      "Dropdown"    => /\bdropdown(-content|-toggle)?\b/i,
+      "Tabs"        => /\btabs?(-boxed|-lifted|-bordered)?\b/i,
+      "Navbar"      => /\bnavbar\b|<nav\b/i,
+      "Breadcrumbs" => /\bbreadcrumbs?\b/i,
+      "Hero"        => /\bhero(-content|-overlay)?\b/i,
+      "Footer"      => /\bfooter\b|<footer\b/i,
+      "Drawer"      => /\bdrawer(-side|-overlay)?\b/i,
+      "Menu"        => /\bmenu(-title|-horizontal)?\b/i,
+      "Pagination" => /\bpaginat(ion|e)\b/i,
+      "Stat"        => /\bstat(-value|-title|-desc)?\b/i,
+      "Table"       => /<table\b|\btable(-zebra|-compact)?\b/i,
+      "Avatar"      => /\bavatar\b/i,
+      "Progress"    => /<progress\b|\bprogress\b/i,
+      "Loading"     => /\bloading(-spinner|-dots|-ring)?\b/i,
+      "Toast"       => /\btoast\b/i,
+      "Tooltip"     => /\btooltip\b/i,
+      "Stack"       => /\bstack\b/i,
+      "Container"   => /\bcontainer\b/i,
+      # Forms
+      "Input"       => /<input\b(?![^>]*type=(["'])(?:hidden|submit|button)\1)|\binput(-bordered|-primary)?\b/i,
+      "Textarea"    => /<textarea\b|\btextarea\b/i,
+      "Select"      => /<select\b|\bselect(-bordered|-primary)?\b/i,
+      "Checkbox"    => /\bcheckbox\b/i,
+      "Radio"       => /\bradio\b/i,
+      "Toggle"      => /\btoggle\b/i,
+      "FileInput"   => /\bfile-input\b/i,
+      "Range"       => /<input[^>]*type=(["'])range\1/i,
+      "FormControl" => /\bform-control\b/i
+    }.freeze
+
+    # Complexity signals — each hit adds to a complexity score.
+    # Score >= COMPLEX_THRESHOLD → complex
+    # Score >= MEDIUM_THRESHOLD  → medium
+    # Otherwise                  → simple
+    SIMPLE_MAX_LINES  = 60
+    MEDIUM_MAX_LINES  = 200
+    MEDIUM_THRESHOLD  = 2
+    COMPLEX_THRESHOLD = 5
+
+    # Each signal: [regex, score]
+    #
+    # Engine-agnostic signals (match helper names, attribute forms, Ruby methods)
+    # fire on ERB, HAML, and Slim equally. Engine-specific signals are split
+    # between the ERB `<% %>` patterns and the HAML/Slim `- stmt` patterns
+    # using mutually-exclusive anchors so each content form only scores once.
+    COMPLEXITY_SIGNALS = [
+      # --- Engine-agnostic ---
+      [/\brender\s+(?:partial:|['":])/, 1],      # renders a partial
+      [/\bform_with\b|\bform_for\b/, 2],         # Rails form builder
+      [/\bfields_for\b/, 2],                     # nested form fields
+      [/\bcontent_for\b/, 1],                    # content yielding
+      [/\byield\b/, 1],                          # layout yield
+      [/\bdata-controller=/, 2],                 # Stimulus controller
+      [/\bdata-action=/, 1],                     # Stimulus action
+      [/\.html_safe\b/, 3],                      # html_safe call
+      [/\blink_to_unless\b|\blink_to_if\b/, 1],  # conditional link helpers
+      [/\bsimple_format\b|\btruncate\b/, 1],     # text helpers
+      [/\btime_ago_in_words\b|\bnumber_to_currency\b|\bnumber_with_delimiter\b/, 1],
+      [/\bcapture\s+do\b/, 2],                   # capture blocks
+      [/\burl_for\b/, 1],                        # URL helpers
+
+      # --- ERB-specific (require `<% %>` delimiters) ---
+      [/<%=\s*raw\b/, 3],                        # ERB raw HTML output
+      [/<%.*?\bcase\b.*?%>/, 2],                 # ERB case statement
+      [/<%.*?\bif\b.*?\belse\b/, 1],             # ERB complex conditional
+      [/<%.*?\b(each|map|select|reject)\b/, 1],  # ERB iteration
+
+      # --- HAML/Slim-specific (line-start `-` statement form) ---
+      # Line-start anchors prevent these from matching inside an ERB `<% %>`
+      # block, avoiding double-counting on ERB content. Score weights mirror
+      # their ERB siblings above so a HAML file and an equivalent ERB file
+      # get similar complexity classifications.
+      [/^\s*=\s*raw\b/, 3],                      # HAML/Slim raw output
+      [/^\s*-\s*case\b/, 2],                     # HAML/Slim case statement
+      [/^\s*-\s*if\b/, 1],                       # HAML/Slim if (conservative)
+      [/^\s*-.*\b(each|map|select|reject)\b\s+do\b/, 1]  # HAML/Slim iteration
+    ].freeze
+
+    # Directories to ignore entirely.
+    SKIP_DIRS = %w[.git node_modules tmp vendor log public storage .phlexed].freeze
+
+    class Analyzer
+      attr_reader :project_root, :registry
+
+      def initialize(project_root:, registry: nil)
+        @project_root = Pathname.new(project_root).expand_path
+        @registry = registry || {}
+        @registry_components = extract_registry_components(@registry)
+      end
+
+      def run
+        templates = find_templates
+        phlex_files = find_phlex_classes
+
+        already_phlex = phlex_files.map { |path| build_phlex_entry(path) }
+        convertible_entries = templates.map { |path| analyze_template(path) }
+
+        convertible = convertible_entries.count { |v| v[:complexity] != "complex" }
+        complex = convertible_entries.count { |v| v[:complexity] == "complex" }
+        skipped = convertible_entries.count { |v| v[:skipped] }
+
+        {
+          audited_at: Time.now.utc.iso8601,
+          project_root: @project_root.to_s,
+          registry: {
+            library: @registry["library"] || "unknown",
+            component_count: (@registry["components"] || []).size
+          },
+          summary: {
+            total_templates: templates.size,
+            already_phlex: already_phlex.size,
+            convertible: convertible,
+            complex_manual_review: complex,
+            skipped: skipped
+          },
+          views: (convertible_entries + already_phlex).sort_by { |v| v[:path] }
+        }
+      end
+
+      private
+
+      def extract_registry_components(registry)
+        components = registry["components"] || []
+        components.map { |c| c["name"] }.compact.to_set
+      end
+
+      def find_templates
+        views_dir = @project_root.join("app/views")
+        return [] unless views_dir.directory?
+
+        Dir.glob(views_dir.join("**/*")).select do |path|
+          File.file?(path) && template?(path)
+        end.map { |p| Pathname.new(p) }
+      end
+
+      def template?(path)
+        # Skip files in ignore dirs (check path relative to project root, not absolute)
+        rel = relative_path(path)
+        return false if SKIP_DIRS.any? { |d| rel.start_with?("#{d}/") || rel.include?("/#{d}/") }
+
+        basename = File.basename(path)
+        TEMPLATE_EXTENSIONS.any? { |ext| basename.end_with?(ext) }
+      end
+
+      def find_phlex_classes
+        phlex_dirs = %w[app/components app/views/components app/views].map { |d| @project_root.join(d) }
+        phlex_files = []
+
+        phlex_dirs.each do |dir|
+          next unless dir.directory?
+          Dir.glob(dir.join("**/*.rb")).each do |file|
+            content = File.read(file, encoding: "UTF-8") rescue next
+            # Must inherit from Phlex::HTML (directly or via a base class)
+            if content.match?(/class\s+\w+.*<.*(?:Phlex::HTML|Views::Base|ApplicationView|ApplicationComponent)/)
+              phlex_files << Pathname.new(file)
+            end
+          end
+        end
+
+        phlex_files.uniq
+      end
+
+      def build_phlex_entry(path)
+        relative = relative_path(path)
+        lines = count_lines(path)
+        {
+          path: relative,
+          engine: "phlex",
+          complexity: "simple",
+          lines: lines,
+          component_matches: [],
+          dependencies: [],
+          already_phlex: true,
+          skipped: false,
+          conversion_notes: "Already a Phlex class — no conversion needed"
+        }
+      end
+
+      def analyze_template(path)
+        relative = relative_path(path)
+        size = File.size(path)
+        lines = count_lines(path)
+        engine = detect_engine(path)
+
+        # Oversized files: skip analysis, flag as complex
+        if size > MAX_SIZE_BYTES
+          return {
+            path: relative,
+            engine: engine,
+            complexity: "complex",
+            lines: lines,
+            component_matches: [],
+            dependencies: [],
+            already_phlex: false,
+            skipped: false,
+            conversion_notes: "File too large (#{size} bytes) — manual review required"
+          }
+        end
+
+        content = File.read(path, encoding: "UTF-8")
+
+        complexity = classify_complexity(content, lines)
+        matches = find_component_matches(content)
+        deps = find_dependencies(path, content)
+
+        notes = []
+        notes << "Uses #{matches.size} registered component#{matches.size == 1 ? '' : 's'}" if matches.any?
+        notes << "Depends on #{deps.size} partial#{deps.size == 1 ? '' : 's'}" if deps.any?
+        notes << "Complex — likely needs manual review" if complexity == "complex"
+
+        {
+          path: relative,
+          engine: engine,
+          complexity: complexity,
+          lines: lines,
+          component_matches: matches,
+          dependencies: deps,
+          already_phlex: false,
+          skipped: false,
+          conversion_notes: notes.join(". ").chomp(".").tap { |s| s << "." unless s.empty? }
+        }
+      end
+
+      def detect_engine(path)
+        name = File.basename(path.to_s)
+        return "erb"  if name.end_with?(".erb")
+        return "haml" if name.end_with?(".haml")
+        return "slim" if name.end_with?(".slim")
+        "unknown"
+      end
+
+      def count_lines(path)
+        lines = 0
+        File.foreach(path) { lines += 1 } rescue lines = 0
+        lines
+      end
+
+      def classify_complexity(content, lines)
+        score = 0
+        COMPLEXITY_SIGNALS.each do |regex, weight|
+          score += weight if content.match?(regex)
+        end
+
+        # Line count bumps
+        score += 2 if lines > MEDIUM_MAX_LINES
+        score += 1 if lines > SIMPLE_MAX_LINES && lines <= MEDIUM_MAX_LINES
+
+        return "complex" if score >= COMPLEX_THRESHOLD
+        return "medium" if score >= MEDIUM_THRESHOLD
+        "simple"
+      end
+
+      def find_component_matches(content)
+        matches = []
+        CLASS_HINTS.each do |component_name, pattern|
+          next unless content.match?(pattern)
+          # Only include components actually in the registry, unless registry is empty
+          if @registry_components.empty? || @registry_components.include?(component_name)
+            matches << component_name
+          end
+        end
+        matches.sort.uniq
+      end
+
+      def find_dependencies(template_path, content)
+        deps = []
+        template_dir = template_path.dirname
+
+        # Pattern 1: render "path/name" or render 'path/name'
+        # Pattern 2: render partial: "path/name"
+        # Pattern 3: render "name" (same directory)
+        render_patterns = [
+          /\brender\s+partial:\s*["']([^"']+)["']/,
+          /\brender\s+["']([^"']+)["']/,
+          /^\s*=\s*render\s+["']([^"']+)["']/  # Slim/HAML syntax
+        ]
+
+        render_patterns.each do |pattern|
+          content.scan(pattern) do |match|
+            partial_ref = match[0]
+            resolved = resolve_partial(partial_ref, template_dir)
+            deps << resolved if resolved
+          end
+        end
+
+        deps.uniq.sort
+      end
+
+      def resolve_partial(partial_ref, from_dir)
+        # "shared/sidebar" → app/views/shared/_sidebar.html.erb (or .haml/.slim)
+        # "form" → same_dir/_form.html.erb
+        if partial_ref.include?("/")
+          parts = partial_ref.split("/")
+          dir = (["app/views"] + parts[0...-1]).join("/")
+          name = parts.last
+          dir_path = @project_root.join(dir)
+        else
+          dir_path = from_dir
+          name = partial_ref
+        end
+
+        # Look for the partial file with any template extension
+        TEMPLATE_EXTENSIONS.each do |ext|
+          candidate = dir_path.join("_#{name}#{ext}")
+          if candidate.exist?
+            return relative_path(candidate)
+          end
+        end
+
+        # Could not resolve — still record the reference
+        relative_ref = partial_ref.include?("/") ? "app/views/#{File.dirname(partial_ref)}/_#{File.basename(partial_ref)}.?" : "#{relative_path(from_dir)}/_#{name}.?"
+        relative_ref
+      end
+
+      def relative_path(path)
+        path = Pathname.new(path) unless path.is_a?(Pathname)
+        path.relative_path_from(@project_root).to_s
+      rescue ArgumentError
+        path.to_s
+      end
+    end
+  end
+end
+
+# CLI entry point
+options = {
+  project: ".",
+  output: ".phlexed/retrofit-audit.json",
+  registry: nil,
+  check: false
+}
+
+OptionParser.new do |opts|
+  opts.banner = "Usage: phlexed-audit [options]"
+  opts.on("--project PATH", "Project root (default: current directory)") { |v| options[:project] = v }
+  opts.on("--output PATH", "Output JSON path (default: .phlexed/retrofit-audit.json)") { |v| options[:output] = v }
+  opts.on("--registry PATH", "Registry JSON path (default: .phlexed/registry.json)") { |v| options[:registry] = v }
+  opts.on("--check", "Print summary, do not write file") { options[:check] = true }
+  opts.on("-h", "--help", "Show help") { puts opts; exit }
+end.parse!
+
+project_root = File.expand_path(options[:project])
+
+unless Dir.exist?(project_root)
+  warn "error: project root does not exist: #{project_root}"
+  exit 1
+end
+
+unless Dir.exist?(File.join(project_root, "app/views"))
+  warn "error: app/views not found in #{project_root}"
+  warn "phlexed-audit requires a Rails project with an app/views directory"
+  exit 1
+end
+
+# Load the registry if one exists
+registry_path = options[:registry] || File.join(project_root, ".phlexed/registry.json")
+registry = {}
+if File.exist?(registry_path)
+  begin
+    registry = JSON.parse(File.read(registry_path))
+  rescue JSON::ParserError => e
+    warn "warning: could not parse registry at #{registry_path}: #{e.message}"
+  end
+else
+  warn "warning: no registry found at #{registry_path} — component matches will be based on class-name heuristics only"
+end
+
+analyzer = Phlexed::Audit::Analyzer.new(project_root: project_root, registry: registry)
+audit = analyzer.run
+
+summary = audit[:summary]
+puts "Audited #{summary[:total_templates]} template(s) in #{project_root}"
+puts "  already_phlex:         #{summary[:already_phlex]}"
+puts "  convertible:           #{summary[:convertible]}"
+puts "  complex_manual_review: #{summary[:complex_manual_review]}"
+puts "  skipped:               #{summary[:skipped]}"
+
+if options[:check]
+  puts
+  puts "(--check mode: not writing output file)"
+  exit 0
+end
+
+output_path = File.expand_path(options[:output], project_root)
+FileUtils.mkdir_p(File.dirname(output_path))
+
+File.write(output_path, JSON.pretty_generate(audit))
+puts
+puts "Audit written to #{options[:output]}"
