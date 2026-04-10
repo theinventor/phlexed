@@ -61,9 +61,17 @@ if [ -f ".phlexed/registry.json" ]; then
   echo "HAS_REGISTRY: yes"
   LIBRARY=$(ruby -rjson -e 'puts JSON.parse(File.read(".phlexed/registry.json"))["library"]' 2>/dev/null || echo "unknown")
   echo "LIBRARY: $LIBRARY"
+
+  # Auto-refresh stale registry
+  if "$PHLEXED_HOME/bin/phlexed-registry" --check 2>&1 | grep -q "STATUS: stale"; then
+    echo "REGISTRY_STALE: yes"
+  else
+    echo "REGISTRY_STALE: no"
+  fi
 else
   echo "HAS_REGISTRY: no"
   echo "LIBRARY: none"
+  echo "REGISTRY_STALE: no"
 fi
 
 # Tailwind config file (needed for theme switching and custom theme injection)
@@ -103,24 +111,68 @@ fi
 
 ## Workflow
 
+**Operating principle: phlexed is the doer, not the instructor.** When a
+prerequisite is missing, offer to fix it via `AskUserQuestion`. Every option is
+an action this skill will take. The phrase "go do X then re-run" is banned.
+
 ### Step 0: Verify prerequisites
 
-**If `HAS_GEMFILE` is `no`:** stop with `STATUS: BLOCKED`. Tell the user to run
-from a Rails project root.
+**If `HAS_GEMFILE` is `no`:** this isn't a Rails project. `AskUserQuestion`:
 
-**If `HAS_STYLE_REGISTRY` is `no`:** stop with `STATUS: BLOCKED`. Tell the user:
+> I don't see a `Gemfile.lock` here. What would you like to do?
 
-> phlexed-theme needs a style registry. Run `/phlexed-setup` first to scan your
-> `tailwind.config.js` and `package.json` and build `.phlexed/style-registry.json`.
+Options:
+- A) I'm in the wrong directory — cancel so I can cd somewhere else
+- B) Cancel
 
-**If `DESIGN_SYSTEM` is `none`:** warn but don't block — the user may still want
-to restyle via the component registry even without DaisyUI.
+Stop cleanly with `STATUS: DONE` either way.
 
-> Heads up: no DaisyUI or Tailwind detected in package.json. Theme switching
-> will not work, but component restyling via `/phlexed-theme restyle` might
-> still help. Continue?
+**If `HAS_STYLE_REGISTRY` is `no`:** the style registry hasn't been built
+yet. Don't block — offer to build it. `AskUserQuestion`:
 
-If user declines, stop.
+> phlexed needs a style registry to know your design system vocabulary
+> (themes, CSS variables, component classes). Want me to run `/phlexed-setup`
+> now to build it?
+
+Options:
+- A) Yes, run `/phlexed-setup` then continue with the theme work
+- B) Cancel
+
+For A: invoke `/phlexed-setup` as a sub-skill. When it returns, re-check
+HAS_STYLE_REGISTRY. If still no (user cancelled inside setup), stop cleanly.
+Otherwise continue.
+
+For B: stop cleanly.
+
+If `REGISTRY_STALE` is `yes`: rebuild silently before continuing.
+
+```bash
+"$PHLEXED_HOME/bin/phlexed-registry"
+```
+
+**If `DESIGN_SYSTEM` is `none`:** the project doesn't have DaisyUI or
+Tailwind installed yet. Theme switching needs a design system. `AskUserQuestion`:
+
+> Theme switching needs a design system (DaisyUI or Tailwind), and I don't
+> see one in `package.json`. What would you like me to do?
+
+Options:
+- A) Install Tailwind CSS + DaisyUI now (recommended for full theming)
+- B) Install Tailwind CSS only (skip DaisyUI — limited theming)
+- C) Continue anyway in restyle mode (just adjust component props, no theme switching)
+- D) Cancel
+
+For A: run the install commands (`bundle add tailwindcss-rails`, then
+`npm install -D tailwindcss daisyui` or `yarn add -D` based on the lockfile),
+generate `tailwind.config.js` if missing, then re-run `phlexed-style-scan` and
+continue.
+
+For B: same flow without daisyui.
+
+For C: continue to Step 1 with `DESIGN_SYSTEM=none`. Skip switch/custom modes
+and only allow restyle/audit when the user picks a mode.
+
+For D: stop cleanly.
 
 ### Step 1: Understand what the user wants
 

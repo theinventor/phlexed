@@ -49,6 +49,21 @@ else
   echo "HAS_PHLEX: no"
 fi
 
+# Are there existing ERB/HAML/Slim templates that could be retrofitted?
+if [ -d "app/views" ]; then
+  EXISTING_TEMPLATES=$(find app/views -type f \( -name '*.erb' -o -name '*.haml' -o -name '*.slim' \) 2>/dev/null | wc -l | tr -d ' ')
+  echo "EXISTING_TEMPLATES: $EXISTING_TEMPLATES"
+else
+  echo "EXISTING_TEMPLATES: 0"
+fi
+
+# What's already in app/views and app/components? (for the "existing views" question)
+if [ -d "app/views" ] || [ -d "app/components" ]; then
+  echo "HAS_VIEW_CODE: yes"
+else
+  echo "HAS_VIEW_CODE: no"
+fi
+
 # Detect the component library
 if [ -f "Gemfile.lock" ] && [ -x "$PHLEXED_HOME/bin/phlexed-detect" ]; then
   DETECTED=$("$PHLEXED_HOME/bin/phlexed-detect" Gemfile.lock 2>/dev/null || echo "none")
@@ -111,20 +126,106 @@ fi
 
 ## Workflow
 
+**Operating principle: phlexed is the doer, not the instructor.** Never tell the
+user "go do X then re-run." Always offer to do X yourself via `AskUserQuestion`.
+Every option presented to the user must be an action this skill will take, not
+homework for them. If something is genuinely blocked (no internet, no write
+access), say so plainly — but never use a blocked status to mean "user, please
+go do this."
+
 ### Step 1: Verify we're in a Rails project
 
-If `HAS_GEMFILE` is `no`: stop with `STATUS: BLOCKED`. Tell the user:
+If `HAS_GEMFILE` is `no`: this isn't a Rails project (or we're in the wrong
+directory). Use `AskUserQuestion`:
 
-> phlexed needs a Rails project. Run `/phlexed-setup` from the root of a Rails app
-> that has a `Gemfile.lock`.
+> I don't see a `Gemfile.lock` in this directory, so this isn't a Rails
+> project root. What would you like to do?
 
-If `HAS_PHLEX` is `no`: stop with `STATUS: BLOCKED`. Tell the user:
+Options:
+- A) I'm in the wrong directory — cancel so I can cd somewhere else
+- B) Create a fresh Rails app here (I'll run `rails new . --skip-bundle` then continue)
+- C) Cancel
 
-> Phlex isn't installed. Add `gem "phlex-rails"` to your Gemfile and run `bundle install`
-> before running `/phlexed-setup`. Then pick a component library: PhlexyUI
-> (https://phlexyui.com) or shadcn_phlexcomponents
-> (https://github.com/sean-yeoh/shadcn_phlexcomponents). Or skip the library and
-> phlexed will scan your existing Phlex classes with the generic adapter.
+If A or C: stop cleanly with `STATUS: DONE`. No blocking message, no homework.
+If B: run `rails new . --force --skip-bundle`, then continue the workflow as if
+HAS_GEMFILE was yes.
+
+### Step 1.5: Phlex installation (the load-bearing UX moment)
+
+If `HAS_PHLEX` is `no`: this is a Rails project that hasn't adopted Phlex yet.
+This is the most important UX moment in the whole skill — phlexed has to be a
+partner who takes action, not a clerk handing out forms.
+
+Use `AskUserQuestion` with these options:
+
+> I don't see Phlex installed in this project yet. Phlexed works best when Phlex
+> is the view layer, but the right path depends on what you've already built.
+> {{If EXISTING_TEMPLATES > 0:}} I notice you have {{EXISTING_TEMPLATES}}
+> ERB/HAML/Slim templates in `app/views/` — those could be migrated to Phlex,
+> or you could use Phlex only for new code going forward. {{end}}
+> What would you like me to do?
+
+Options (the exact set depends on `EXISTING_TEMPLATES`):
+
+**If `EXISTING_TEMPLATES > 0` (existing app):**
+- A) Install phlex-rails + phlexy_ui, then audit my existing views and recommend
+  whether to retrofit them to Phlex (recommended)
+- B) Install phlex-rails + phlexy_ui, leave my existing views alone, use Phlex
+  for new code only
+- C) Install phlex-rails + shadcn_phlexcomponents instead (Tailwind-native)
+- D) Install phlex-rails only — I'll bring my own component library later
+- E) Cancel
+
+**If `EXISTING_TEMPLATES == 0` (greenfield or all-Phlex project):**
+- A) Install phlex-rails + phlexy_ui (DaisyUI-based, recommended for most projects)
+- B) Install phlex-rails + shadcn_phlexcomponents (Tailwind-native)
+- C) Install phlex-rails only — I'll bring my own component library later
+- D) Cancel
+
+**Execute the choice (no homework, no re-run instructions):**
+
+For option A (existing app, retrofit path):
+1. Run `bundle add phlex-rails phlexy_ui` (this updates the Gemfile and runs `bundle install`)
+2. Continue with the rest of setup — detect, build registry, build style registry, append CLAUDE.md rules
+3. After Step 7 (success report), invoke `/phlexed-retrofit` as a sub-skill so the user lands directly in the audit + recommendation flow. The retrofit skill will analyze the existing views and tell the user whether they look like good migration candidates or whether using phlexed for new code is the better play.
+
+For option B (existing app, install only):
+1. Run `bundle add phlex-rails phlexy_ui`
+2. Continue with the rest of setup
+3. In the Step 7 report, mention the existing templates and tell the user that
+   they can run `/phlexed-retrofit` later if they change their mind
+
+For option C (existing app, shadcn):
+1. Run `bundle add phlex-rails shadcn_phlexcomponents`
+2. Continue with the rest of setup
+
+For option D (existing app, phlex-only):
+1. Run `bundle add phlex-rails`
+2. Continue with the rest of setup. The generic adapter will scan whatever
+   custom Phlex components exist (or none, in which case the registry is empty
+   and that's fine).
+
+For options A/B/C/D in the greenfield case: same as their existing-app counterparts
+minus the retrofit recommendation in option A.
+
+For option Cancel/E: stop cleanly with `STATUS: DONE`.
+
+**If `bundle add` fails** (e.g. dependency conflict, network issue): surface the
+exact error verbatim, then `AskUserQuestion`:
+
+> `bundle add` failed: {{stderr}}. What do you want me to do?
+
+Options:
+- A) Roll back the Gemfile change and try a different library
+- B) Show me the conflicting gem versions in `Gemfile.lock` so I can debug
+- C) Try `bundle update` first (in case the lockfile is just stale)
+- D) Cancel — I'll fix it myself
+
+For A: revert the Gemfile change, return to the Step 1.5 question with the
+chosen library removed from the options.
+For B: print the relevant section of `Gemfile.lock` and any conflict messages.
+For C: run `bundle update --conservative <gem>` and retry the original add.
+For D: roll back the Gemfile change and stop cleanly.
 
 ### Step 2: Handle re-runs
 
@@ -146,32 +247,38 @@ affect the rendered cursorrules styling section.
 
 ### Step 3: Handle no-library detection
 
-If `DETECTED_LIBRARY` is `none`: AskUserQuestion —
+This step only fires when `HAS_PHLEX` is `yes` but no known Phlex component
+library was found in `Gemfile.lock`. (If `HAS_PHLEX` was `no`, Step 1.5
+already handled the install + library choice.)
 
-> No known Phlex component library (phlexy_ui, shadcn_phlexcomponents, protos, ruby_ui)
-> was found in Gemfile.lock. How do you want to proceed?
+If `DETECTED_LIBRARY` is `none`: `AskUserQuestion` —
+
+> Phlex is installed but no known component library (phlexy_ui,
+> shadcn_phlexcomponents, protos, ruby_ui) is in your Gemfile.lock. How do you
+> want me to proceed?
 
 Options:
 - A) Install PhlexyUI (DaisyUI-based, recommended for most projects)
 - B) Install shadcn_phlexcomponents (Tailwind-native)
-- C) Use the generic adapter to scan existing Phlex classes in `app/components/`
-- D) Cancel setup
+- C) Skip the library — scan my existing Phlex classes in `app/components/`
+  with the generic adapter
+- D) Cancel
 
-If A: print the install snippet for PhlexyUI and stop (the user needs to run bundle
-install before re-running setup):
+**Execute the choice — never just print install snippets and stop:**
 
-```ruby
-# In Gemfile:
-gem "phlexy_ui"
-```
+For option A: run `bundle add phlexy_ui`, then continue to Step 4 with
+`DETECTED_LIBRARY=phlexy_ui`.
 
-Then: `bundle install && /phlexed-setup`
+For option B: run `bundle add shadcn_phlexcomponents`, then continue to Step 4
+with `DETECTED_LIBRARY=shadcn_phlexcomponents`.
 
-If B: same pattern for `gem "shadcn_phlexcomponents"`.
+For option C: set `ADAPTER=generic` and continue.
 
-If C: set `ADAPTER=generic` and continue.
+For option D: stop cleanly with `STATUS: DONE`.
 
-If D: stop with `STATUS: BLOCKED`.
+**If `bundle add` fails** (dependency conflict, network issue): surface the exact
+error, offer to roll back the Gemfile change, and ask whether to retry, switch
+libraries, or cancel. Never just leave the user with "fix and re-run."
 
 ### Step 4: Build the component registry
 
@@ -185,11 +292,17 @@ else
 fi
 ```
 
-Verify `.phlexed/registry.json` was produced. If not, report the error from the
-adapter and stop with `STATUS: BLOCKED`.
+Verify `.phlexed/registry.json` was produced. If not, the adapter crashed —
+surface the error verbatim and use `AskUserQuestion`:
+
+> The {{library}} adapter failed to build the registry. Here's the error:
+> {{stderr}}. What do you want me to do?
+
+Options: A) Try the generic adapter against `app/components/` instead,
+B) Show me the gem source so I can debug, C) Cancel.
 
 Read the first 40 lines of `.phlexed/registry.json` to confirm the library and
-component count. Report the summary to the user: library name, version, component count.
+component count. Report the summary: library name, version, component count.
 
 ### Step 4b: Build the style registry
 
@@ -295,41 +408,77 @@ Next steps:
   /phlexed-retrofit   convert ERB/HAML views to Phlex
   /phlexed-theme      switch themes or restyle
 
-Re-run /phlexed-setup after upgrading your component gem or tailwind.config.js
-to refresh both registries.
+phlexed will auto-refresh both registries when you upgrade your component gem
+or change tailwind.config.js — no manual re-run needed. Just invoke any phlexed
+skill and it'll detect the staleness and rebuild on the fly.
 ```
 
-**If `CONFLICT_COUNT > 0`**, add a clearly-formatted warning block above the
-"Next steps" section listing every conflicting local component:
+**If `CONFLICT_COUNT > 0`**, surface the conflicts and offer to fix them.
+Add a warning block above the "Next steps" section, then immediately use
+`AskUserQuestion`:
 
 ```
 ⚠ Name conflicts detected
 
 <CONFLICT_COUNT> local component(s) share a short name with a library
 component. The library version wins in the registry, so your local version
-will be ignored by /phlexed-build until you rename it:
+will be ignored by /phlexed-build:
 
   - Card  (app/components/card.rb conflicts with PhlexyUI::Card)
   - Modal (app/components/modal.rb conflicts with PhlexyUI::Modal)
-
-Rename each file + class and re-run /phlexed-setup to refresh the registry.
 ```
+
+> I can rename your conflicting local components so they coexist with the
+> library versions. What would you like me to do?
+
+Options:
+- A) Rename them all with a project prefix (e.g. `Card` → `MyApp::Card`,
+  updates the file, the class, and every render call across the app)
+- B) Let me pick which to rename and which to keep as-is
+- C) Leave them — I'll deal with the conflicts later
+- D) Show me each conflicting file before deciding
+
+For A: rewrite each conflicting file (rename class, move under a namespace),
+grep for `render Card.new(` etc. across the app and update every call site,
+then re-run `phlexed-registry` to refresh the registry. Show the diff.
+
+For B: ask per-component, then apply the same rename logic to the chosen ones.
+
+For C: leave the warning visible and continue. Note in the report that the
+local versions won't be used until renamed.
+
+For D: print the file contents for each conflicting file, then loop back to
+this question.
 
 **If `LOCAL_COUNT == 0`**, omit the "(N library + N local)" parenthetical
 from the Components line — show just "Components: N registered" as in v0.1.
 This keeps the output terse for the common library-only case.
 
 If the style registry is in degraded mode (`design_system: none`), surface that
-explicitly so the user isn't surprised when `/phlexed-theme` refuses to switch
-themes:
+explicitly AND offer to fix it via `AskUserQuestion`:
 
 ```
 Design system:  none detected
 Style registry: .phlexed/style-registry.json (degraded mode)
-
-/phlexed-theme theme switching is unavailable until you add DaisyUI or Tailwind
-to your package.json.
 ```
+
+> No DaisyUI or Tailwind found in `package.json`, so theme switching with
+> `/phlexed-theme` won't work yet. What should I do?
+
+Options:
+- A) Install Tailwind CSS + DaisyUI now (recommended for full styling support)
+- B) Install Tailwind CSS only (skip DaisyUI)
+- C) Leave it — I'll add a design system later
+
+For A: run `bundle add tailwindcss-rails` (if not present) then
+`npm install -D tailwindcss daisyui` (or `yarn add -D` based on
+which lockfile exists), generate `tailwind.config.js` if missing, then
+re-run `phlexed-style-scan` to refresh the style registry. Print the diff.
+
+For B: same flow without daisyui in the npm install.
+
+For C: leave the warning visible and continue. The user can re-run
+`/phlexed-setup` later after they install a design system.
 
 ### Step 8: Offer Cursor rules generation (if detected)
 
@@ -366,17 +515,36 @@ later; they can run it manually.
 
 Report status: `DONE`.
 
-## Troubleshooting
+## Failure handling
 
-- **"bundle show <gem> failed"**: the component gem is in Gemfile.lock but not installed.
-  Run `bundle install` and retry.
-- **"Registry shows 0 components"**: the adapter regexes didn't match the gem's source.
-  Check that the gem version is supported (PhlexyUI ≥ 0.1, shadcn_phlexcomponents ≥ 0.3).
-  Re-run with `--adapter generic` to fall back to scanning your own `app/components/`.
-- **"CLAUDE.md routing already exists"**: phlexed-setup has been run before. Re-run
-  with option C in Step 2 to refresh just the routing rules.
+When something fails, the skill takes action — it doesn't hand the user a
+worksheet. For each known failure mode, the right pattern is:
+
+1. Detect the failure
+2. Tell the user what happened in one sentence
+3. Offer 2-4 concrete recovery actions via `AskUserQuestion` where the options
+   are things this skill will do
+4. Execute the choice
+
+- **"bundle show <gem> failed"**: the component gem is in Gemfile.lock but not
+  installed (probably because the user pulled changes without running
+  `bundle install`). Don't tell them to run it — just run `bundle install`
+  and retry. Only ask if it fails twice.
+
+- **"Registry shows 0 components"**: the adapter regexes didn't match the gem's
+  source. Most likely the gem version is unsupported. Use `AskUserQuestion`:
+  > The {{library}} adapter ran but found 0 components. The installed version
+  > may be outside the supported range. What should I do?
+  Options: A) Try the generic adapter against `app/components/` instead,
+  B) Show me the first few files in the gem so I can debug, C) Cancel.
+
+- **"CLAUDE.md routing already exists"**: not actually a failure — phlexed has
+  been run here before. The Step 2 re-run handler covers this. If somehow we
+  reach Step 5 with existing routing, just refresh it in place rather than
+  duplicating.
 
 ## Voice
 
-Direct, concrete, no filler. Name the file, the command, the outcome. If something
-fails, say what failed and what to try next.
+Direct, concrete, no filler. Name the file, the command, the outcome. If
+something fails, say what failed and offer to fix it — never hand the user
+homework. The phrase "go do X then re-run" is banned.

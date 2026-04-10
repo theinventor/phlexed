@@ -1,6 +1,7 @@
 <!--
   phlexed skill routing rules — appended by /phlexed-setup.
-  Do not edit the markers below. Re-run /phlexed-setup to refresh.
+  Do not edit the markers below. To refresh, just invoke /phlexed-setup again
+  and it will detect this section and update it in place.
 -->
 
 ## phlexed skill routing
@@ -48,8 +49,9 @@ and produce correct, consistent output.
 
 ## Registry staleness
 
-If the user upgrades a Phlex component gem, the registry may be out of date. Run
-`phlexed-registry --check` from the project root. If it reports `STATUS: stale`,
-re-run `/phlexed-setup` to rebuild.
+phlexed skills auto-detect a stale registry (Gemfile.lock newer than
+`.phlexed/registry.json`) and refresh it without asking. The user never has to
+re-run setup manually after a gem upgrade — just invoking any phlexed skill
+triggers the refresh.
 
 <!-- /phlexed skill routing -->

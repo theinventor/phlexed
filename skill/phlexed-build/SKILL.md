@@ -98,22 +98,48 @@ fi
 
 ## Workflow
 
+**Operating principle: phlexed is the doer, not the instructor.** When a
+prerequisite is missing, never tell the user "go run X then re-run me." Offer
+to do X yourself via `AskUserQuestion`. Every option is an action this skill
+will take.
+
 ### Step 1: Verify prerequisites
 
-If `HAS_GEMFILE` is `no`: stop with `STATUS: BLOCKED`. Tell the user:
+If `HAS_GEMFILE` is `no`: this isn't a Rails project. `AskUserQuestion`:
 
-> phlexed-build needs to run from a Rails project root. Change to your Rails app
-> directory and try again.
+> I don't see a `Gemfile.lock` here. What would you like to do?
 
-If `HAS_REGISTRY` is `no`: stop with `STATUS: BLOCKED`. Tell the user:
+Options:
+- A) I'm in the wrong directory — cancel so I can cd somewhere else
+- B) Cancel
 
-> No `.phlexed/registry.json` found. Run `/phlexed-setup` first to detect your
-> Phlex component library and build the registry.
+Stop cleanly with `STATUS: DONE` either way. No homework.
 
-If `REGISTRY_STALE` is `yes`: warn the user but do not block:
+If `HAS_REGISTRY` is `no`: phlexed isn't set up in this project yet. Don't
+block — offer to set it up. `AskUserQuestion`:
 
-> Registry may be out of date (Gemfile.lock is newer than .phlexed/registry.json).
-> Re-run `/phlexed-setup` to refresh. Proceeding with the current registry.
+> phlexed isn't set up in this project yet (no `.phlexed/registry.json`). I
+> need to detect your Phlex library and build the component registry before I
+> can build a page. Want me to run `/phlexed-setup` now?
+
+Options:
+- A) Yes, run `/phlexed-setup` now then continue with the build
+- B) Cancel
+
+For A: invoke `/phlexed-setup` as a sub-skill. When it returns, re-check
+HAS_REGISTRY. If it's still no (the user cancelled inside setup), stop
+cleanly. Otherwise continue to Step 2.
+
+For B: stop cleanly with `STATUS: DONE`.
+
+If `REGISTRY_STALE` is `yes`: just refresh it. Don't ask, don't warn — running
+`phlexed-registry` takes ~1 second and gives correct output. Do the work.
+
+```bash
+"$PHLEXED_HOME/bin/phlexed-registry"
+```
+
+Re-load the preamble values from the fresh registry, then continue.
 
 ### Step 2: Understand the request
 

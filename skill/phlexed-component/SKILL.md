@@ -46,9 +46,17 @@ if [ -f ".phlexed/registry.json" ]; then
   echo "HAS_REGISTRY: yes"
   LIBRARY=$(ruby -rjson -e 'puts JSON.parse(File.read(".phlexed/registry.json"))["library"]' 2>/dev/null || echo "unknown")
   echo "LIBRARY: $LIBRARY"
+
+  # Auto-refresh stale registry — never make the user do this manually
+  if "$PHLEXED_HOME/bin/phlexed-registry" --check 2>&1 | grep -q "STATUS: stale"; then
+    echo "REGISTRY_STALE: yes"
+  else
+    echo "REGISTRY_STALE: no"
+  fi
 else
   echo "HAS_REGISTRY: no"
   echo "LIBRARY: none"
+  echo "REGISTRY_STALE: no"
 fi
 
 # Detect test framework (prefer rspec if both exist — most Rails + Phlex projects use it)
@@ -120,15 +128,45 @@ fi
 
 ## Workflow
 
+**Operating principle: phlexed is the doer, not the instructor.** Missing
+prerequisites become offers, not roadblocks. Every `AskUserQuestion` option is
+an action this skill will take.
+
 ### Step 1: Verify prerequisites
 
-If `HAS_GEMFILE` is `no`: stop with `STATUS: BLOCKED`. Tell the user to run from a
-Rails project root.
+If `HAS_GEMFILE` is `no`: this isn't a Rails project. `AskUserQuestion`:
 
-If `HAS_REGISTRY` is `no`: stop with `STATUS: BLOCKED`. Tell the user:
+> I don't see a `Gemfile.lock` here. What would you like to do?
 
-> No `.phlexed/registry.json` found. Run `/phlexed-setup` first so the new component
-> can be added to the registry and picked up by `/phlexed-build`.
+Options:
+- A) I'm in the wrong directory — cancel so I can cd somewhere else
+- B) Cancel
+
+Stop cleanly with `STATUS: DONE` either way.
+
+If `HAS_REGISTRY` is `no`: phlexed isn't set up yet. Don't block — offer to
+run setup now. `AskUserQuestion`:
+
+> phlexed isn't set up in this project yet. I need a registry before I can
+> create a new component (so the new one gets added to it and picked up by
+> `/phlexed-build`). Want me to run `/phlexed-setup` first?
+
+Options:
+- A) Yes, run `/phlexed-setup` now then continue creating the component
+- B) Cancel
+
+For A: invoke `/phlexed-setup` as a sub-skill. When it returns, re-check
+HAS_REGISTRY. If still no (user cancelled inside setup), stop cleanly.
+Otherwise continue to Step 2.
+
+For B: stop cleanly with `STATUS: DONE`.
+
+If `REGISTRY_STALE` is `yes`: rebuild silently. Don't ask, don't warn — running
+`phlexed-registry` takes ~1 second. Just do the work and continue.
+
+```bash
+"$PHLEXED_HOME/bin/phlexed-registry"
+```
 
 ### Step 2: Understand the component request
 
@@ -307,7 +345,9 @@ The append mode:
 **When to fall back to a full rebuild instead:**
 
 - The registry file is missing (`.phlexed/registry.json` doesn't exist) —
-  append requires an existing registry. Run `/phlexed-setup` first.
+  append requires an existing registry. This shouldn't happen because Step 1
+  already offered to run `/phlexed-setup`, but if it does, fall through to
+  Step 1's offer-setup flow.
 - The user has upgraded a library gem and wants the full library re-scanned
   — in that case run the full `phlexed-registry` which calls both the
   library adapter and `generic.rb` and merges them.

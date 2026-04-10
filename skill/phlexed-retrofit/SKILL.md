@@ -50,10 +50,18 @@ if [ -f ".phlexed/registry.json" ]; then
   COMPONENT_COUNT=$(ruby -rjson -e 'puts JSON.parse(File.read(".phlexed/registry.json"))["component_count"]' 2>/dev/null || echo "0")
   echo "LIBRARY: $LIBRARY"
   echo "COMPONENT_COUNT: $COMPONENT_COUNT"
+
+  # Auto-refresh stale registry — never make the user do this manually
+  if "$PHLEXED_HOME/bin/phlexed-registry" --check 2>&1 | grep -q "STATUS: stale"; then
+    echo "REGISTRY_STALE: yes"
+  else
+    echo "REGISTRY_STALE: no"
+  fi
 else
   echo "HAS_REGISTRY: no"
   echo "LIBRARY: none"
   echo "COMPONENT_COUNT: 0"
+  echo "REGISTRY_STALE: no"
 fi
 
 # Existing audit? (if re-running)
@@ -119,28 +127,98 @@ fi
 
 ## Workflow
 
+**Operating principle: phlexed is the doer, not the instructor.** Missing
+prerequisites and dirty state become offers, not roadblocks. Every option in
+every `AskUserQuestion` is an action this skill will take. The phrase "go do X
+then re-run" is banned.
+
 ### Step 0: Verify prerequisites
 
-**If `HAS_GEMFILE` is `no`:** stop with `STATUS: BLOCKED`. Tell the user to run
-from a Rails project root.
+**If `HAS_GEMFILE` is `no`:** this isn't a Rails project. `AskUserQuestion`:
 
-**If `HAS_REGISTRY` is `no`:** stop with `STATUS: BLOCKED`. Tell the user:
+> I don't see a `Gemfile.lock` here. What would you like to do?
 
-> phlexed-retrofit needs to know what Phlex components are available. Run
-> `/phlexed-setup` first to build `.phlexed/registry.json`, then re-run
-> `/phlexed-retrofit`.
+Options:
+- A) I'm in the wrong directory — cancel so I can cd somewhere else
+- B) Cancel
 
-**If `TEMPLATE_COUNT` is `0`:** stop with `STATUS: DONE_WITH_CONCERNS`. Nothing
-to retrofit — this project has no ERB/HAML/Slim templates in `app/views/`.
+Stop cleanly with `STATUS: DONE` either way.
 
-**If `GIT_CLEAN` is `no`:** stop with `STATUS: BLOCKED`. Tell the user:
+**If `HAS_REGISTRY` is `no`:** phlexed isn't set up yet. Offer to run setup,
+since retrofit needs the component registry to know what to convert TO.
+`AskUserQuestion`:
 
-> Your working tree has uncommitted changes. phlexed-retrofit commits atomically
-> after each conversion and needs a clean starting point so you can cleanly diff
-> or roll back any iteration. Commit or stash your work first, then re-run.
+> Retrofit needs to know what Phlex components are available before I can
+> convert any views. Want me to run `/phlexed-setup` first?
 
-**If `HAS_RALPH` is `no`:** warn but don't block — the user can still get through
-Phase 3 (plan + generated loop artifacts) and run Ralph manually.
+Options:
+- A) Yes, run `/phlexed-setup` then continue with the retrofit audit
+- B) Cancel
+
+For A: invoke `/phlexed-setup` as a sub-skill. When it returns, re-check
+HAS_REGISTRY. If still no (user cancelled inside setup), stop cleanly.
+Otherwise continue.
+
+For B: stop cleanly.
+
+If `REGISTRY_STALE` is `yes`: rebuild silently before continuing. The user
+shouldn't have to think about staleness.
+
+```bash
+"$PHLEXED_HOME/bin/phlexed-registry"
+```
+
+**If `TEMPLATE_COUNT` is `0`:** Nothing to retrofit — this project has no
+ERB/HAML/Slim templates in `app/views/`. Stop cleanly with `STATUS: DONE`.
+Tell the user: "All views in `app/views/` are already Phlex (or there are no
+views at all). Nothing for retrofit to do."
+
+**If `GIT_CLEAN` is `no`:** the working tree has uncommitted changes.
+Retrofit commits atomically per conversion, so it needs a clean starting
+point. Don't block — offer to handle the dirty state. `AskUserQuestion`:
+
+> Your working tree has uncommitted changes. Retrofit commits one view at a
+> time, so I need a clean starting point. What would you like me to do with
+> your current changes?
+
+Options:
+- A) Commit them now with a message I'll write (recommended if they're real work)
+- B) Stash them — I'll bring them back when retrofit is done
+- C) Show me `git status` and let me decide
+- D) Cancel — I'll handle the changes myself and re-run later
+
+For A: run `git add -A && git commit -m "<descriptive message based on diff>"`.
+Generate the message by inspecting `git diff` output. Continue to Step 1.
+
+For B: run `git stash push -u -m "phlexed-retrofit auto-stash"`. Note the
+stash ref. Continue to Step 1. After Step 7, offer to `git stash pop` it back.
+
+For C: print `git status -s` output, then loop back to this question.
+
+For D: stop cleanly with `STATUS: DONE`.
+
+**If `HAS_RALPH` is `no`:** Ralph is the loop runner that executes Phase 4.
+Don't block — offer to install it. `AskUserQuestion`:
+
+> Ralph (the loop runner that executes the conversion) isn't installed. Want
+> me to install it now? It's a small CLI tool that drives Claude Code in
+> autonomous loops.
+
+Options:
+- A) Yes, install Ralph now (recommended)
+- B) Continue without Ralph — generate the plan + Ralph loop artifacts so I
+  can run them manually later
+- C) Cancel
+
+For A: run the Ralph install command (typically `git clone <ralph-repo>
+~/.ralph && ~/.ralph/install.sh`). If install fails, surface the error and
+fall through to option B.
+
+For B: continue. In Step 6, instead of executing the loop, just print the
+generated file paths and the `ralph -p .phlexed/retrofit/PROMPT.md` command
+the user can run later.
+
+For C: stop cleanly.
 
 ### Step 1: Handle re-runs
 
@@ -176,8 +254,14 @@ project is already fully Phlex — stop with `STATUS: DONE`. Tell the user:
 
 > All {{already_phlex}} views are already Phlex classes. Nothing to retrofit.
 
-If audit fails (non-zero exit or missing output file), stop with `STATUS: BLOCKED`
-and surface the error.
+If audit fails (non-zero exit or missing output file), surface the exact error
+and use `AskUserQuestion`:
+
+> The audit script crashed: {{stderr}}. What do you want me to do?
+
+Options: A) Show me the audit script's first 100 lines so I can debug,
+B) Try the audit again (it may have been a transient issue),
+C) Cancel.
 
 ### Step 3: Build the plan (end of Phase 1 → Phase 2)
 
@@ -331,10 +415,12 @@ cd "$PROJECT_ROOT" && ralph -p .phlexed/retrofit/PROMPT.md
 
 Let Ralph run. When it exits, run Step 7.
 
-**If A and `HAS_RALPH` is `no`:** stop with `STATUS: BLOCKED`. Tell the user:
-
-> Ralph is not installed or not in PATH. Install it first, then run:
->   ralph -p .phlexed/retrofit/PROMPT.md
+**If A and `HAS_RALPH` is `no`:** Step 0 already handled this case — either
+Ralph was installed (HAS_RALPH should now be yes, fire the loop) or the user
+chose to continue without Ralph (option B in Step 0 — just print the file
+paths and the ralph command they can run after installing). This branch
+should be unreachable if Step 0 ran correctly. If somehow we're here, treat
+it as Step 0 option B (print paths, stop cleanly).
 
 **If B**: print the file paths and the ralph command, stop with `STATUS: DONE`.
 
@@ -404,13 +490,15 @@ Report `STATUS: DONE`.
 
 Direct, concrete, slightly more cautious than other phlexed skills because this
 one modifies many files. Name counts, file paths, commit messages. Never say
-"let me try" — either do it or report a block. Always give the user a way to
-bail out cheaply.
+"let me try" — either do it or report what specifically blocked you (and offer
+to unblock it via `AskUserQuestion`). Always give the user a way to bail out
+cheaply.
 
 ## Troubleshooting
 
-- **"Registry may be stale":** warning from Step 2 — means Gemfile.lock is newer
-  than `.phlexed/registry.json`. Run `/phlexed-setup` first to refresh.
+- **"Registry may be stale":** Gemfile.lock is newer than `.phlexed/registry.json`.
+  Just run `phlexed-registry` to refresh — don't ask, don't tell the user to run
+  setup, just do the rebuild. It takes a second.
 - **"3 consecutive failures" during Ralph loop:** the generated PROMPT.md tells
   Ralph to stop. Usually means the project has a non-standard convention
   (custom base class, unusual helper) that the conversion can't handle. Read
