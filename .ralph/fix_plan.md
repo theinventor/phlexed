@@ -10,7 +10,7 @@
 - [ ] Build `skill/bin/phlexed-registry` — shell script that orchestrates detection + adapter to produce .phlexed/registry.json
 - [ ] Test detect + registry against sample Rails app
 
-## Phase 2: Skills (High Priority)
+## Phase 2: Core Skills (High Priority)
 
 - [ ] Write `skill/SKILL.md` — root skill definition (phlexed-setup workflow: detect library, build registry, append CLAUDE.md rules)
 - [ ] Write `skill/templates/claude-md-rules.md` — CLAUDE.md routing rules template
@@ -19,6 +19,25 @@
 - [ ] Write `skill/phlexed-build/SKILL.md` — page/feature generation skill (loads registry, plans layout, generates Phlex views)
 - [ ] Write `skill/phlexed-component/SKILL.md` — component creation skill (reads patterns, generates component + tests, rebuilds registry)
 - [ ] Test skills end-to-end: run /phlexed-setup in sample app, then /phlexed-build to generate a page
+
+## Phase 2.5: Retrofit Skill (High Priority)
+
+- [ ] Build `skill/bin/phlexed-audit` — shell/Ruby script that scans app/views/ for all templates (.erb, .haml, .slim), assesses complexity (simple/medium/complex), maps component matches against registry, identifies shared partial dependencies, and outputs .phlexed/retrofit-audit.json
+- [ ] Build `skill/bin/phlexed-retrofit-plan` — reads the audit JSON, groups views into batches (shared partials first, then layouts, then pages by complexity), identifies new components needed, outputs a structured conversion plan
+- [ ] Build `skill/templates/retrofit-prompt.md` — Ralph PROMPT.md template for retrofit loops. Includes conversion rules: one view per iteration, preserve all behavior, use registered components, rename old templates to .pre-phlex, atomic commits, skip on test failure
+- [ ] Build `skill/templates/retrofit-ralphrc.template` — .ralphrc template with project-appropriate tool permissions for the retrofit loop
+- [ ] Write `skill/phlexed-retrofit/SKILL.md` — the retrofit skill definition with 4 phases: audit, present plan (AskUserQuestion with approve/modify/exclude/report-only), generate Ralph loop (.phlexed/retrofit/ with PROMPT.md + fix_plan.md + .ralphrc), execute with user approval (ralph -p .phlexed/retrofit/PROMPT.md)
+- [ ] Test retrofit against sample app: add some ERB views to sample/, run /phlexed-retrofit, verify it audits correctly, generates the plan, and the Ralph loop converts views one by one
+
+## Phase 2.75: Theme/Styling Skill (High Priority)
+
+- [ ] Build `skill/bin/phlexed-style-scan` — scans package.json for DaisyUI version, reads tailwind.config.js for active themes/custom themes/extensions, cross-references PhlexyUI component prop-to-class mappings with DaisyUI's class vocabulary. Outputs .phlexed/style-registry.json
+- [ ] Extend `skill/bin/phlexed-registry` to also build style-registry.json during setup (calls phlexed-style-scan)
+- [ ] Write `skill/templates/component-patterns/styling-rules.md` — the styling rules that get injected into CLAUDE.md. Anti-patterns list: no inline styles, no hardcoded colors, no raw Tailwind when DaisyUI class exists, no custom CSS when design system handles it
+- [ ] Write `skill/phlexed-theme/SKILL.md` — theme/restyle skill: loads both registries, handles theme switching (update data-theme + tailwind.config), custom theming (generate DaisyUI theme definitions), component restyling (use props not classes). Rebuilds style registry after changes.
+- [ ] Update `skill/SKILL.md` (phlexed-setup) to build style-registry.json alongside component registry
+- [ ] Update `skill/templates/claude-md-rules.md` to include styling rules section
+- [ ] Test: verify style-registry.json is accurate for sample app, verify /phlexed-theme can switch DaisyUI themes correctly
 
 ## Phase 3: Sample App (Medium Priority)
 

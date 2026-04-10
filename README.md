@@ -34,9 +34,11 @@ Then in any Rails project with Phlex:
 
 ## Skills
 
-- `/phlexed-setup` — Detect your component library, build registry, configure Claude
+- `/phlexed-setup` — Detect your component library, build registries, configure Claude
 - `/phlexed-build` — Generate a page or feature using your registered components
 - `/phlexed-component` — Create a new component following your library's patterns
+- `/phlexed-retrofit` — Audit your existing ERB/HAML views, plan the conversion, and run it autonomously via Ralph loop
+- `/phlexed-theme` — Restyle, switch themes, customize colors using the design system correctly (DaisyUI/Tailwind)
 
 ## License
 

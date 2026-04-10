@@ -41,14 +41,22 @@ phlexed/
     SKILL.md                          # Root skill definition (entry point)
     phlexed-build/SKILL.md            # Page/feature generation skill
     phlexed-component/SKILL.md        # Component creation skill
+    phlexed-retrofit/SKILL.md         # Audit + convert existing views to Phlex
+    phlexed-theme/SKILL.md            # Theme/restyle using the design system correctly
     bin/
       phlexed-detect                  # Detect which component library is installed
       phlexed-registry                # Build/query the component registry
+      phlexed-audit                   # Scan app/views/ and assess conversion targets
+      phlexed-retrofit-plan           # Generate batched conversion plan from audit
+      phlexed-style-scan              # Scan DaisyUI/Tailwind config, build style registry
     templates/
       claude-md-rules.md              # CLAUDE.md routing rules template
       component-patterns/             # Per-library prompt patterns
         phlexy-ui.md                  # PhlexyUI adapter prompt patterns
         shadcn-phlexcomponents.md     # shadcn_phlexcomponents adapter patterns
+        styling-rules.md              # Anti-pattern rules for styling (injected into CLAUDE.md)
+      retrofit-prompt.md              # Ralph PROMPT.md template for retrofit loops
+      retrofit-ralphrc.template       # .ralphrc template for retrofit loops
     adapters/
       phlexy_ui.rb                    # Registry builder for PhlexyUI
       shadcn_phlexcomponents.rb       # Registry builder for shadcn_phlexcomponents
@@ -101,6 +109,52 @@ It indexes every available Phlex component so Claude knows what's available:
   }
 }
 ```
+
+### Retrofit Engine (/phlexed-retrofit)
+
+The retrofit skill is the migration engine. It converts an existing app's ERB/HAML/Slim
+views to Phlex components, autonomously, via a Ralph loop. Four phases:
+
+1. **Audit:** `phlexed-audit` scans `app/views/` for all templates. For each one, it
+   assesses complexity (simple/medium/complex), maps which parts match registry components,
+   traces dependencies (shared partials, layouts), and flags anything already Phlex.
+   Outputs `.phlexed/retrofit-audit.json`.
+
+2. **Present Plan:** Show the user a summary (how many views, batch order, new components
+   needed). User approves, modifies, or cancels. Batching logic: shared partials first
+   (they unblock everything else), then layouts, then pages sorted easiest to hardest.
+
+3. **Generate Ralph Loop:** Create `.phlexed/retrofit/` with:
+   - `PROMPT.md` — conversion rules (one view per iteration, preserve behavior, use
+     registered components, rename old templates to `.pre-phlex`, commit atomically)
+   - `fix_plan.md` — one task per view, ordered by batch, with dependencies noted
+   - `.ralphrc` — tool permissions for the target project
+
+4. **Execute:** Fire `ralph -p .phlexed/retrofit/PROMPT.md`. Each iteration converts
+   one view, runs tests, commits. If a conversion fails tests, it skips and moves on.
+
+The design doc has the full audit JSON schema and all conversion rules.
+
+### Theme/Styling Engine (/phlexed-theme)
+
+Prevents AI from wrecking the design system. During setup, phlexed builds a **style
+registry** (`.phlexed/style-registry.json`) alongside the component registry. It captures:
+
+- DaisyUI version, available themes, active theme, custom themes
+- CSS variable mappings (--p for primary, --s for secondary, etc.)
+- Component class vocabulary (btn-primary, card-bordered, etc.) with PhlexyUI prop mappings
+- Anti-patterns: never use hardcoded colors, never inline styles, never raw Tailwind
+  when a DaisyUI class exists
+
+The style registry is built by `phlexed-style-scan`, which reads:
+- `package.json` for DaisyUI version
+- `tailwind.config.js` for themes, custom colors, extensions
+- PhlexyUI source for prop-to-class mappings
+
+Styling rules get injected into CLAUDE.md so ALL skills (build, component, retrofit)
+respect the design system, not just `/phlexed-theme`.
+
+The design doc has the full style registry schema and anti-pattern list.
 
 ### How Registry Building Works
 
