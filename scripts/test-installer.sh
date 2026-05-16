@@ -49,9 +49,9 @@ SAMPLE_LOCKFILE="$REPO_ROOT/sample/Gemfile.lock"
 FAKE_HOME=$(mktemp -d -t phlexed-installer.XXXXXX)
 INSTALL_TARGET="$FAKE_HOME/.claude/skills/phlexed"
 
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 # cleanup() is invoked by the trap below; shellcheck can't see trap-invoked
-# usage so it incorrectly flags this as unused.
+# usage so it incorrectly flags this as unused/unreachable.
 cleanup() {
   rm -rf "$FAKE_HOME"
 }

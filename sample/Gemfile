@@ -9,7 +9,7 @@ gem "puma", ">= 5.0"
 
 # View layer — Phlex instead of ERB for new views, phlexy_ui for components
 gem "phlex-rails", "~> 1.2"
-gem "phlexy_ui", "~> 0.2"
+gem "phlexy_ui", "~> 0.1.22"
 
 # Assets / CSS
 gem "tailwindcss-rails", "~> 3.0"
