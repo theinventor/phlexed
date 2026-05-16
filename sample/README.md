@@ -27,6 +27,10 @@ sample/
   config/
     application.rb               Rails::Application stub
     boot.rb                      bundler + bootsnap
+    database.yml                 sqlite config for Rails boot/render commands
+    environment.rb               standard Rails boot + initializer entrypoint
+    initializers/
+      phlexy_ui_runtime_fixture.rb Ruby 3.3 render shim for the PhlexyUI fixture
     routes.rb                    root + dashboard + settings + profile
   app/
     controllers/                 ApplicationController + one per resource
@@ -79,7 +83,10 @@ ruby ../skill/bin/phlexed-style-scan --project .
 which requires `bundle install` to actually succeed. Running the full
 component registry build end-to-end is therefore the one test that depends on
 having a working Ruby + Bundler toolchain with the phlexy_ui gem available.
-The rest of the skills work against static files in this directory.
+The rendered profile page uses `config/initializers/phlexy_ui_runtime_fixture.rb`
+to replace the PhlexyUI component autoloads that Ruby 3.3 cannot parse with
+small local components matching the sample's Card/Button usage. The rest of the
+skills work against static files in this directory.
 
 ## What each skill tests against
 
