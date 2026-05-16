@@ -35,9 +35,9 @@ SAMPLE="$REPO_ROOT/sample"
 
 # --- Ephemeral workspace ---
 WORKDIR=$(mktemp -d -t phlexed-test.XXXXXX)
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 # cleanup() is invoked by the trap below; shellcheck can't see trap-invoked
-# usage so it incorrectly flags this as unused.
+# usage so it incorrectly flags this as unused/unreachable.
 cleanup() {
   rm -rf "$WORKDIR"
   # Also clean up any .phlexed artifacts written to sample/ during testing
