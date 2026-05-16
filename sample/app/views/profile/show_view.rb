@@ -13,7 +13,7 @@ module Profile
       render PhlexyUI::Card.new(bordered: true) do
         render PhlexyUI::CardTitle.new { "About #{@user.name}" }
         render PhlexyUI::CardBody.new do
-          para(class: "text-base-content/70") { @user.bio }
+          p(class: "text-base-content/70") { @user.bio }
           div(class: "mt-4 space-y-2") do
             render_fact("Email", @user.email)
             render_fact("Joined", @user.created_at.to_fs(:long))
