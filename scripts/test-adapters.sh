@@ -135,6 +135,40 @@ RUBY
   done <<< "$output"
 }
 
+text_matches() {
+  local text="$1"
+  local pattern="$2"
+  grep -q -- "$pattern" <<< "$text"
+}
+
+text_matches_e() {
+  local text="$1"
+  local pattern="$2"
+  grep -Eq -- "$pattern" <<< "$text"
+}
+
+first_matching_line() {
+  local text="$1"
+  local pattern="$2"
+  grep -m 1 -- "$pattern" <<< "$text" || true
+}
+
+first_matching_line_e() {
+  local text="$1"
+  local pattern="$2"
+  grep -Em 1 -- "$pattern" <<< "$text" || true
+}
+
+file_mtime() {
+  local file="$1"
+
+  if stat -c %Y "$file" >/dev/null 2>&1; then
+    stat -c %Y "$file"
+  else
+    stat -f %m "$file"
+  fi
+}
+
 # =============================================================================
 # OFFLINE TESTS — against the committed sample/ fixture. No network.
 # =============================================================================
@@ -187,12 +221,12 @@ run_offline_tests() {
   subsection "phlexed-audit"
   local audit_check
   audit_check=$(cd "$SAMPLE" && ruby "$BIN/phlexed-audit" --project . --check 2>&1)
-  if echo "$audit_check" | grep -q "convertible:[[:space:]]*7"; then
+  if text_matches "$audit_check" "convertible:[[:space:]]*7"; then
     pass "--check reports 7 convertible templates"
   else
     fail "expected 7 convertible, got output: $(echo "$audit_check" | tr '\n' ' ')"
   fi
-  if echo "$audit_check" | grep -q "already_phlex:[[:space:]]*2"; then
+  if text_matches "$audit_check" "already_phlex:[[:space:]]*2"; then
     pass "--check reports 2 already-phlex files"
   else
     fail "expected 2 already_phlex, got output: $(echo "$audit_check" | tr '\n' ' ')"
@@ -589,17 +623,17 @@ SLIM
   subsection "phlexed-style-scan"
   local style_check
   style_check=$(cd "$SAMPLE" && ruby "$BIN/phlexed-style-scan" --project . --check 2>&1)
-  if echo "$style_check" | grep -q "design_system:[[:space:]]*daisyui"; then
+  if text_matches "$style_check" "design_system:[[:space:]]*daisyui"; then
     pass "--check detects daisyui"
   else
     fail "expected daisyui, got: $(echo "$style_check" | tr '\n' ' ')"
   fi
-  if echo "$style_check" | grep -q "version:[[:space:]]*4.12.10"; then
+  if text_matches "$style_check" "version:[[:space:]]*4.12.10"; then
     pass "--check detects daisyui version 4.12.10"
   else
     fail "expected version 4.12.10, got: $(echo "$style_check" | tr '\n' ' ')"
   fi
-  if echo "$style_check" | grep -q "active: phlexed-brand"; then
+  if text_matches "$style_check" "active: phlexed-brand"; then
     pass "--check detects custom active theme 'phlexed-brand'"
   else
     fail "expected active: phlexed-brand, got: $(echo "$style_check" | tr '\n' ' ')"
@@ -788,43 +822,43 @@ JSON
   local cr_content
   cr_content=$(cat "$cr_project/.cursorrules" 2>/dev/null || echo "")
 
-  if echo "$cr_content" | grep -q "^# phlexed BEGIN$"; then
+  if text_matches "$cr_content" "^# phlexed BEGIN$"; then
     pass ".cursorrules contains BEGIN marker"
   else
     fail ".cursorrules missing BEGIN marker"
   fi
 
-  if echo "$cr_content" | grep -q "^# phlexed END$"; then
+  if text_matches "$cr_content" "^# phlexed END$"; then
     pass ".cursorrules contains END marker"
   else
     fail ".cursorrules missing END marker"
   fi
 
-  if echo "$cr_content" | grep -qE "Library: phlexy_ui v0\.3\.1"; then
+  if text_matches_e "$cr_content" "Library: phlexy_ui v0\.3\.1"; then
     pass ".cursorrules reports library name + version"
   else
     fail ".cursorrules missing 'Library: phlexy_ui v0.3.1' line"
   fi
 
-  if echo "$cr_content" | grep -qE "^- Button \(variants:.*primary"; then
+  if text_matches_e "$cr_content" "^- Button \(variants:.*primary"; then
     pass ".cursorrules formats Button component line correctly"
   else
-    fail ".cursorrules Button line malformed (found: $(echo "$cr_content" | grep Button | head -1))"
+    fail ".cursorrules Button line malformed (found: $(first_matching_line "$cr_content" "Button"))"
   fi
 
-  if echo "$cr_content" | grep -q "daisyui v4.12.10"; then
+  if text_matches "$cr_content" "daisyui v4.12.10"; then
     pass ".cursorrules includes design system + version"
   else
     fail ".cursorrules missing design system info"
   fi
 
-  if echo "$cr_content" | grep -q "Active theme: .dark."; then
+  if text_matches "$cr_content" "Active theme: .dark."; then
     pass ".cursorrules reports active theme"
   else
     fail ".cursorrules missing active theme info"
   fi
 
-  if echo "$cr_content" | grep -q "NEVER hardcode hex colors"; then
+  if text_matches "$cr_content" "NEVER hardcode hex colors"; then
     pass ".cursorrules includes anti-patterns from style registry"
   else
     fail ".cursorrules missing anti-patterns section"
@@ -857,16 +891,16 @@ JSON
 
   # --check mode should print to stdout without touching the file
   local before_mtime after_mtime
-  before_mtime=$(stat -f %m "$cr_project/.cursorrules" 2>/dev/null || stat -c %Y "$cr_project/.cursorrules")
+  before_mtime=$(file_mtime "$cr_project/.cursorrules")
   local check_output
   check_output=$(ruby "$BIN/phlexed-render-cursorrules" --project "$cr_project" --check 2>&1)
-  after_mtime=$(stat -f %m "$cr_project/.cursorrules" 2>/dev/null || stat -c %Y "$cr_project/.cursorrules")
+  after_mtime=$(file_mtime "$cr_project/.cursorrules")
   if [ "$before_mtime" = "$after_mtime" ]; then
     pass "--check does not modify the file"
   else
     fail "--check modified the file (mtime changed $before_mtime → $after_mtime)"
   fi
-  if echo "$check_output" | grep -q "^# phlexed BEGIN$"; then
+  if text_matches "$check_output" "^# phlexed BEGIN$"; then
     pass "--check prints rendered output to stdout"
   else
     fail "--check output missing BEGIN marker"
@@ -903,48 +937,48 @@ JSON
   local merged_content
   merged_content=$(cat "$cr_merged_project/.cursorrules" 2>/dev/null || echo "")
 
-  if echo "$merged_content" | grep -q "^### From library (phlexy_ui)$"; then
+  if text_matches "$merged_content" "^### From library (phlexy_ui)$"; then
     pass "partitioned listing has 'From library' sub-heading"
   else
     fail "missing 'From library' sub-heading in merged-registry output"
   fi
 
-  if echo "$merged_content" | grep -q "^### Project-local"; then
+  if text_matches "$merged_content" "^### Project-local"; then
     pass "partitioned listing has 'Project-local' sub-heading"
   else
     fail "missing 'Project-local' sub-heading in merged-registry output"
   fi
 
-  if echo "$merged_content" | grep -q "(2 from library, 2 project-local)"; then
+  if text_matches "$merged_content" "(2 from library, 2 project-local)"; then
     pass "summary line shows library/local counts"
   else
     fail "summary line missing library/local count breakdown"
   fi
 
-  if echo "$merged_content" | grep -q "1 component conflict with library names"; then
+  if text_matches "$merged_content" "1 component conflict with library names"; then
     pass "project-local section shows conflict count callout"
   else
     fail "project-local conflict count callout missing"
   fi
 
   # Inline conflict warning on the colliding Card
-  if echo "$merged_content" | grep -qE "^- Card.*⚠.*name conflict"; then
+  if text_matches_e "$merged_content" "^- Card.*⚠.*name conflict"; then
     pass "conflicting Card component has inline ⚠ warning"
   else
-    fail "conflicting Card missing inline warning (found: $(echo "$merged_content" | grep -E "^- Card" | head -1))"
+    fail "conflicting Card missing inline warning (found: $(first_matching_line_e "$merged_content" "^- Card"))"
   fi
 
   # Non-conflicting UserBadge should NOT have a warning
-  if echo "$merged_content" | grep -qE "^- UserBadge$"; then
+  if text_matches_e "$merged_content" "^- UserBadge$"; then
     pass "non-conflicting UserBadge has no warning"
   else
-    fail "UserBadge line missing or incorrectly has a warning (found: $(echo "$merged_content" | grep -E "^- UserBadge" | head -1))"
+    fail "UserBadge line missing or incorrectly has a warning (found: $(first_matching_line_e "$merged_content" "^- UserBadge"))"
   fi
 
   # Library components should NOT get warnings even if one of them shares a
   # name with a local component (the library one is canonical).
-  library_button_line=$(echo "$merged_content" | awk '/^### From library/,/^### Project-local/' | grep -E "^- Button")
-  if echo "$library_button_line" | grep -q "⚠"; then
+  library_button_line=$(awk '/^### From library/,/^### Project-local/' <<< "$merged_content" | grep -E "^- Button" || true)
+  if text_matches "$library_button_line" "⚠"; then
     fail "library Button incorrectly has a conflict warning"
   else
     pass "library Button has no warning (library wins in conflicts)"
